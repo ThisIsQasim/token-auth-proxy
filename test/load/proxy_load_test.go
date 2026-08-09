@@ -1,0 +1,234 @@
+//go:build load
+
+// Package load is a soak test proving the atomic-swap reload path is safe
+// under real concurrent contention, not just correct in a single-threaded
+// unit test. It attacks the real exec'd binary at a fixed rate while a
+// background goroutine continuously flips the config file between two
+// backends, and records both request latency (via vegeta) and the proxy
+// process's own CPU/memory usage (via gopsutil) for the run.
+//
+// Run via `make test-load` or `go test -tags=load ./test/load/...`. Set
+// LOAD_TEST_REPORT_PATH to have the run's metrics written out as JSON —
+// CI uploads this as a build artifact so results are inspectable after
+// the fact, not just pass/fail.
+package load
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/shirou/gopsutil/v4/process"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	vegeta "github.com/tsenart/vegeta/v12/lib"
+
+	"github.com/ThisIsQasim/token-auth-proxy/test/testutil"
+)
+
+const (
+	attackDuration  = 8 * time.Second
+	attackRate      = 200 // requests/sec
+	flipInterval    = 200 * time.Millisecond
+	resourceSampleP = 250 * time.Millisecond
+
+	minSuccessRate = 0.99
+	maxP99Latency  = 250 * time.Millisecond
+)
+
+// resourceSample is one point-in-time reading of the proxy process's
+// resource usage.
+type resourceSample struct {
+	CPUPercent float64
+	RSSBytes   uint64
+}
+
+// resourceSummary aggregates samples collected over the run.
+type resourceSummary struct {
+	Samples        int     `json:"samples"`
+	PeakCPUPercent float64 `json:"peak_cpu_percent"`
+	AvgCPUPercent  float64 `json:"avg_cpu_percent"`
+	PeakRSSBytes   uint64  `json:"peak_rss_bytes"`
+	AvgRSSBytes    uint64  `json:"avg_rss_bytes"`
+}
+
+func summarizeResources(samples []resourceSample) resourceSummary {
+	var s resourceSummary
+	s.Samples = len(samples)
+	if len(samples) == 0 {
+		return s
+	}
+	var cpuSum float64
+	var rssSum uint64
+	for _, sample := range samples {
+		cpuSum += sample.CPUPercent
+		rssSum += sample.RSSBytes
+		if sample.CPUPercent > s.PeakCPUPercent {
+			s.PeakCPUPercent = sample.CPUPercent
+		}
+		if sample.RSSBytes > s.PeakRSSBytes {
+			s.PeakRSSBytes = sample.RSSBytes
+		}
+	}
+	s.AvgCPUPercent = cpuSum / float64(len(samples))
+	s.AvgRSSBytes = rssSum / uint64(len(samples))
+	return s
+}
+
+// sampleResources polls the given pid's CPU% and RSS every
+// resourceSampleP until ctx is canceled, sending each reading on the
+// returned channel (buffered generously; the caller drains it after
+// closing has been signaled).
+func sampleResources(ctx context.Context, pid int32) <-chan resourceSample {
+	out := make(chan resourceSample, 1024)
+	go func() {
+		defer close(out)
+		proc, err := process.NewProcess(pid)
+		if err != nil {
+			return
+		}
+		ticker := time.NewTicker(resourceSampleP)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				cpuPct, err := proc.Percent(0)
+				if err != nil {
+					continue
+				}
+				mem, err := proc.MemoryInfo()
+				if err != nil {
+					continue
+				}
+				select {
+				case out <- resourceSample{CPUPercent: cpuPct, RSSBytes: mem.RSS}:
+				default:
+				}
+			}
+		}
+	}()
+	return out
+}
+
+// latencyReport is the JSON shape written to LOAD_TEST_REPORT_PATH.
+type latencyReport struct {
+	Name        string          `json:"name"`
+	Requests    uint64          `json:"requests"`
+	Success     float64         `json:"success"`
+	Throughput  float64         `json:"throughput_rps"`
+	LatencyP50  string          `json:"latency_p50"`
+	LatencyP95  string          `json:"latency_p95"`
+	LatencyP99  string          `json:"latency_p99"`
+	LatencyMax  string          `json:"latency_max"`
+	StatusCodes map[string]int  `json:"status_codes"`
+	Errors      []string        `json:"errors,omitempty"`
+	Resources   resourceSummary `json:"resources"`
+}
+
+func writeReport(tb testing.TB, r latencyReport) {
+	tb.Helper()
+	path := os.Getenv("LOAD_TEST_REPORT_PATH")
+	if path == "" {
+		path = "load-test-report.json"
+	}
+	if dir := filepath.Dir(path); dir != "." {
+		_ = os.MkdirAll(dir, 0o755)
+	}
+	data, err := json.MarshalIndent(r, "", "  ")
+	if err != nil {
+		tb.Logf("failed to marshal load test report: %v", err)
+		return
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil { //nolint:gosec // report is not sensitive
+		tb.Logf("failed to write load test report to %s: %v", path, err)
+		return
+	}
+	tb.Logf("wrote load test report to %s", path)
+}
+
+func TestLoad_HotReloadUnderTraffic(t *testing.T) {
+	backendA := testutil.NewBackend(t, "A")
+	backendB := testutil.NewBackend(t, "B")
+
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	testutil.WriteAtomic(t, cfgPath, testutil.ConfigYAML(":0", backendA.URL))
+
+	proc := testutil.StartProxy(t, cfgPath)
+	targetURL := "http://" + proc.Addr + "/"
+
+	flipCtx, stopFlipping := context.WithCancel(context.Background())
+	defer stopFlipping()
+	go func() {
+		urls := [2]string{backendA.URL, backendB.URL}
+		i := 0
+		ticker := time.NewTicker(flipInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-flipCtx.Done():
+				return
+			case <-ticker.C:
+				i++
+				testutil.WriteAtomic(t, cfgPath, testutil.ConfigYAML(":0", urls[i%2]))
+			}
+		}
+	}()
+
+	resourceCtx, stopSampling := context.WithCancel(context.Background())
+	resourceCh := sampleResources(resourceCtx, int32(proc.Cmd.Process.Pid)) //nolint:gosec // pid is always positive
+
+	targeter := vegeta.NewStaticTargeter(vegeta.Target{Method: "GET", URL: targetURL})
+	attacker := vegeta.NewAttacker()
+	rate := vegeta.Rate{Freq: attackRate, Per: time.Second}
+
+	var metrics vegeta.Metrics
+	for res := range attacker.Attack(targeter, rate, attackDuration, "hot-reload-load") {
+		metrics.Add(res)
+	}
+	metrics.Close()
+
+	stopFlipping()
+	stopSampling()
+
+	var samples []resourceSample
+	for s := range resourceCh {
+		samples = append(samples, s)
+	}
+	resSummary := summarizeResources(samples)
+
+	report := latencyReport{
+		Name:        "hot-reload-load",
+		Requests:    metrics.Requests,
+		Success:     metrics.Success,
+		Throughput:  metrics.Throughput,
+		LatencyP50:  metrics.Latencies.P50.String(),
+		LatencyP95:  metrics.Latencies.P95.String(),
+		LatencyP99:  metrics.Latencies.P99.String(),
+		LatencyMax:  metrics.Latencies.Max.String(),
+		StatusCodes: metrics.StatusCodes,
+		Errors:      metrics.Errors,
+		Resources:   resSummary,
+	}
+	writeReport(t, report)
+
+	t.Logf("requests=%d success=%.4f throughput=%.1f/s p50=%s p95=%s p99=%s max=%s",
+		metrics.Requests, metrics.Success, metrics.Throughput,
+		metrics.Latencies.P50, metrics.Latencies.P95, metrics.Latencies.P99, metrics.Latencies.Max)
+	t.Logf("resources: samples=%d peak_cpu=%.1f%% avg_cpu=%.1f%% peak_rss=%dMB avg_rss=%dMB",
+		resSummary.Samples, resSummary.PeakCPUPercent, resSummary.AvgCPUPercent,
+		resSummary.PeakRSSBytes/1024/1024, resSummary.AvgRSSBytes/1024/1024)
+
+	// Deliberately generous thresholds — this catches a broken lock,
+	// deadlock, or panic in the swap path, not tight SLOs, since shared
+	// CI runners are noisy.
+	assert.GreaterOrEqual(t, metrics.Success, minSuccessRate,
+		"expected >=%.0f%% success despite continuous config reloads", minSuccessRate*100)
+	assert.LessOrEqual(t, metrics.Latencies.P99, maxP99Latency,
+		"P99 latency should stay bounded even while reloads are happening")
+	require.NotEmpty(t, samples, "expected at least one resource usage sample during the attack")
+}

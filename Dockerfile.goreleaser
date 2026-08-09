@@ -1,0 +1,18 @@
+# syntax=docker/dockerfile:1
+#
+# Used only by GoReleaser's `dockers_v2` step on tagged releases:
+# GoReleaser cross-compiles the binary itself, so this Dockerfile has no
+# build stage — it just packages an already-built binary. GoReleaser
+# stages each platform's binary at <goos>/<goarch>/<name> in the build
+# context, so this must COPY from a TARGETOS/TARGETARCH-qualified path;
+# buildx sets those build args automatically per platform during a
+# multi-platform build. Kept in sync by hand with the main Dockerfile's
+# final stage (same base image, user, entrypoint); see .goreleaser.yaml.
+
+FROM gcr.io/distroless/static-debian13:nonroot
+ARG TARGETOS
+ARG TARGETARCH
+COPY ${TARGETOS}/${TARGETARCH}/token-auth-proxy /usr/local/bin/token-auth-proxy
+USER nonroot:nonroot
+ENTRYPOINT ["/usr/local/bin/token-auth-proxy"]
+CMD ["-config", "/etc/token-auth-proxy/config.yaml"]

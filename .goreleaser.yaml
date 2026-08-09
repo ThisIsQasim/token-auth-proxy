@@ -1,0 +1,68 @@
+version: 2
+
+project_name: token-auth-proxy
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: token-auth-proxy
+    main: ./cmd/token-auth-proxy
+    binary: token-auth-proxy
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+      - -X main.commit={{ .Commit }}
+      - -X main.date={{ .Date }}
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+# dockers_v2 (not the older dockers+docker_manifests combo, which
+# GoReleaser is deprecating) drives `docker buildx build --platform=...`
+# directly, producing one real multi-arch manifest per tag in a single
+# invocation instead of building per-arch images and merging them by hand.
+dockers_v2:
+  - dockerfile: Dockerfile.goreleaser
+    images:
+      - ghcr.io/thisisqasim/token-auth-proxy
+    tags:
+      - "{{ .Version }}"
+      - latest
+    platforms:
+      - linux/amd64
+      - linux/arm64
+
+release:
+  github:
+    owner: ThisIsQasim
+    name: token-auth-proxy
+  draft: false
+  prerelease: auto

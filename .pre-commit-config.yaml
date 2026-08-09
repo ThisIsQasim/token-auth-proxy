@@ -1,0 +1,45 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-added-large-files
+      - id: mixed-line-ending
+      - id: check-merge-conflict
+
+  - repo: local
+    hooks:
+      - id: gofmt
+        name: gofmt
+        entry: gofmt -l -s -w
+        language: system
+        types: [go]
+
+      - id: goimports
+        name: goimports
+        entry: goimports -l -w
+        language: system
+        types: [go]
+
+      - id: go-vet
+        name: go vet
+        entry: go vet ./...
+        language: system
+        pass_filenames: false
+        types: [go]
+
+      - id: golangci-lint
+        name: golangci-lint
+        entry: golangci-lint run --fix --build-tags=integration,load
+        language: system
+        pass_filenames: false
+        types: [go]
+
+      - id: go-mod-tidy
+        name: go mod tidy
+        entry: go mod tidy
+        language: system
+        pass_filenames: false
+        files: '(^|/)go\.(mod|sum)$'
