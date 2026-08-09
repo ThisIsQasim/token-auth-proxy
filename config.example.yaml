@@ -1,3 +1,7 @@
+# Every field here can also be set via a CLI flag or a TAP_-prefixed env
+# var, which take precedence over this file and are re-applied on every
+# reload (not just at startup) — see the README's Configuration section.
+
 # Address the proxy listens on. Read once at startup; changing this
 # requires a process restart to take effect.
 listen_addr: ":8080"

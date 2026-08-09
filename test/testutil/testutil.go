@@ -89,16 +89,37 @@ type Process struct {
 	tb testing.TB
 }
 
-// StartProxy builds (if needed) and starts the real proxy binary against
-// configPath, waits for it to log its bound listen address, and registers
-// a cleanup that sends SIGTERM and waits for exit. configPath's config
-// should set listen_addr to ":0" so the OS picks an ephemeral port.
+// StartProxy builds (if needed) and starts the real proxy binary with
+// --config configPath, waits for it to log its bound listen address, and
+// registers a cleanup that sends SIGTERM and waits for exit. configPath's
+// config should set listen_addr to ":0" so the OS picks an ephemeral
+// port. For flags/env-only scenarios (no file) or overrides layered on
+// top of a file, use StartProxyArgs or StartProxyWith instead.
 func StartProxy(tb testing.TB, configPath string) *Process {
+	tb.Helper()
+	return StartProxyArgs(tb, "--config", configPath)
+}
+
+// StartProxyArgs is like StartProxy but takes arbitrary CLI args instead
+// of assuming --config <path> — used for testing the flags/env-only (no
+// file) mode.
+func StartProxyArgs(tb testing.TB, args ...string) *Process {
+	tb.Helper()
+	return StartProxyWith(tb, nil, args...)
+}
+
+// StartProxyWith is like StartProxyArgs but also lets the caller add
+// extra environment variables (e.g. "TAP_TARGET=...") on top of the
+// current process's environment; env may be nil for none.
+func StartProxyWith(tb testing.TB, env []string, args ...string) *Process {
 	tb.Helper()
 
 	bin := BuildBinary(tb)
-	// #nosec G204 -- bin is our own just-built binary and configPath is a test-controlled temp file
-	cmd := exec.CommandContext(context.Background(), bin, "-config", configPath)
+	// #nosec G204 -- bin is our own just-built binary and args/env are test-controlled
+	cmd := exec.CommandContext(context.Background(), bin, args...)
+	if env != nil {
+		cmd.Env = append(os.Environ(), env...)
+	}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {

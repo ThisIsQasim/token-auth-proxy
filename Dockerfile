@@ -16,4 +16,4 @@ FROM gcr.io/distroless/static-debian13:nonroot
 COPY --from=builder /out/token-auth-proxy /usr/local/bin/token-auth-proxy
 USER nonroot:nonroot
 ENTRYPOINT ["/usr/local/bin/token-auth-proxy"]
-CMD ["-config", "/etc/token-auth-proxy/config.yaml"]
+CMD ["--config", "/etc/token-auth-proxy/config.yaml"]

@@ -15,4 +15,4 @@ ARG TARGETARCH
 COPY ${TARGETOS}/${TARGETARCH}/token-auth-proxy /usr/local/bin/token-auth-proxy
 USER nonroot:nonroot
 ENTRYPOINT ["/usr/local/bin/token-auth-proxy"]
-CMD ["-config", "/etc/token-auth-proxy/config.yaml"]
+CMD ["--config", "/etc/token-auth-proxy/config.yaml"]

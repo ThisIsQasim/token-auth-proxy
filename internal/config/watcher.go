@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/spf13/pflag"
 )
 
 // defaultDebounce coalesces bursts of filesystem events (e.g. an editor's
@@ -34,9 +35,15 @@ const dirRetryBackoff = time.Second
 // A reload that fails to parse or validate is logged and discarded — the
 // previously published Config stays live, so a transient bad write never
 // corrupts the running proxy.
+//
+// If fs is non-nil, environment variables and fs's flags are re-applied
+// on top of the file on every load — including every reload, not just
+// the first — so a CLI/env override (e.g. -target) keeps winning even
+// if the file changes the same field underneath it. See loadLayered.
 type Watcher struct {
 	path     string
 	dir      string
+	fs       *pflag.FlagSet
 	debounce time.Duration
 	logger   *slog.Logger
 	fsw      *fsnotify.Watcher
@@ -54,13 +61,13 @@ type Watcher struct {
 // getting scheduled is still captured. If the watch were only set up
 // inside Start's goroutine, a caller that writes the file immediately
 // after starting the watcher in the background could lose that update
-// forever.
-func NewWatcher(path string, logger *slog.Logger) (*Watcher, error) {
+// forever. fs may be nil for a plain file load with no override layer.
+func NewWatcher(path string, fs *pflag.FlagSet, logger *slog.Logger) (*Watcher, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
 
-	cfg, err := Load(path)
+	cfg, err := loadLayered(path, fs)
 	if err != nil {
 		return nil, err
 	}
@@ -79,6 +86,7 @@ func NewWatcher(path string, logger *slog.Logger) (*Watcher, error) {
 	w := &Watcher{
 		path:     path,
 		dir:      dir,
+		fs:       fs,
 		debounce: defaultDebounce,
 		logger:   logger,
 		fsw:      fsw,
@@ -186,12 +194,14 @@ func (w *Watcher) retryAddDir(ctx context.Context) {
 	}
 }
 
-// reload re-reads and re-validates the config file from disk. On success
-// it publishes the new Config and warns if anything besides Target
-// changed (those fields require a restart to take effect). On failure it
-// logs and leaves the previously published Config untouched.
+// reload re-reads and re-validates the config file from disk, re-applying
+// the override layer (if any) on top exactly as NewWatcher's initial load
+// did. On success it publishes the new Config and warns if anything
+// besides Target changed (those fields require a restart to take
+// effect). On failure it logs and leaves the previously published Config
+// untouched.
 func (w *Watcher) reload() {
-	next, err := Load(w.path)
+	next, err := loadLayered(w.path, w.fs)
 	if err != nil {
 		w.logger.Warn("config reload failed, keeping previous config", "err", err)
 		return

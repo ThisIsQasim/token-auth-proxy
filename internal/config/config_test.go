@@ -70,7 +70,7 @@ func TestLoad(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			path := writeTempConfig(t, tt.yaml)
-			cfg, err := Load(path)
+			cfg, err := loadLayered(path, nil)
 
 			if tt.wantErr {
 				require.Error(t, err)
@@ -90,13 +90,13 @@ func TestLoad(t *testing.T) {
 }
 
 func TestLoad_MissingFile(t *testing.T) {
-	_, err := Load(filepath.Join(t.TempDir(), "does-not-exist.yaml"))
+	_, err := loadLayered(filepath.Join(t.TempDir(), "does-not-exist.yaml"), nil)
 	require.Error(t, err)
 }
 
 func TestApplyDefaults_TimeoutsRetainOverrides(t *testing.T) {
 	path := writeTempConfig(t, "target: http://localhost:9000\ntimeouts:\n  dial: 2s\n  read: 45s\n")
-	cfg, err := Load(path)
+	cfg, err := loadLayered(path, nil)
 	require.NoError(t, err)
 
 	assert.Equal(t, 2*time.Second, cfg.Timeouts.Dial)
@@ -110,7 +110,7 @@ func TestApplyDefaults_TimeoutsRetainOverrides(t *testing.T) {
 
 func TestApplyDefaults_AllTimeoutsDefaulted(t *testing.T) {
 	path := writeTempConfig(t, "target: http://localhost:9000\n")
-	cfg, err := Load(path)
+	cfg, err := loadLayered(path, nil)
 	require.NoError(t, err)
 
 	assert.Equal(t, defaultReadHeaderTimeout, cfg.Timeouts.ReadHeader)

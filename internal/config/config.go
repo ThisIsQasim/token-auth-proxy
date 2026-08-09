@@ -6,10 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
-	"os"
 	"time"
-
-	"gopkg.in/yaml.v3"
 )
 
 // defaultListenAddr is used when listen_addr is omitted from the config file.
@@ -47,29 +44,6 @@ type Config struct {
 	Timeouts   TimeoutConfig `yaml:"timeouts,omitempty"`
 
 	targetURL *url.URL
-}
-
-// Load reads and parses the YAML file at path, applies defaults, and
-// validates the result. The returned Config is ready to use — its
-// TargetURL() is guaranteed non-nil on success.
-func Load(path string) (*Config, error) {
-	data, err := os.ReadFile(path) // #nosec G304 -- path is an operator-supplied -config flag, not untrusted input
-	if err != nil {
-		return nil, fmt.Errorf("read config: %w", err)
-	}
-
-	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("parse config: %w", err)
-	}
-
-	cfg.applyDefaults()
-
-	if err := cfg.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid config: %w", err)
-	}
-
-	return &cfg, nil
 }
 
 // applyDefaults fills in zero-value fields with their defaults.

@@ -89,6 +89,51 @@ func TestProxyHealthz(t *testing.T) {
 	assert.Equal(t, "ok", body)
 }
 
+func TestProxyStaticFlagMode(t *testing.T) {
+	backend := testutil.NewBackend(t, "static-flag")
+
+	proc := testutil.StartProxyArgs(t, "--target", backend.URL, "--listen-addr", ":0")
+	baseURL := "http://" + proc.Addr
+
+	assertBodyEventually(t, baseURL+"/", "static-flag", 2*time.Second)
+}
+
+func TestProxyStaticEnvMode(t *testing.T) {
+	backend := testutil.NewBackend(t, "static-env")
+
+	proc := testutil.StartProxyWith(t, []string{"TAP_TARGET=" + backend.URL, "TAP_LISTEN_ADDR=:0"})
+	baseURL := "http://" + proc.Addr
+
+	assertBodyEventually(t, baseURL+"/", "static-env", 2*time.Second)
+}
+
+// TestProxyFlagOverridePersistsAcrossFileReload is the full end-to-end
+// (real binary, real subprocess, real file) proof of the precedence
+// contract: a -target flag must keep winning over the config file even
+// after the file changes the same field and triggers a real hot-reload.
+func TestProxyFlagOverridePersistsAcrossFileReload(t *testing.T) {
+	backendFile := testutil.NewBackend(t, "from-file")
+	backendPinned := testutil.NewBackend(t, "pinned")
+
+	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
+	testutil.WriteAtomic(t, cfgPath, testutil.ConfigYAML(":0", backendFile.URL))
+
+	proc := testutil.StartProxyArgs(t, "--config", cfgPath, "--target", backendPinned.URL)
+	baseURL := "http://" + proc.Addr
+
+	assertBodyEventually(t, baseURL+"/", "pinned", 2*time.Second)
+
+	backendFileV2 := testutil.NewBackend(t, "from-file-v2")
+	testutil.WriteAtomic(t, cfgPath, testutil.ConfigYAML(":0", backendFileV2.URL))
+
+	// Give the watcher time to actually process the file change; the
+	// override must still be in effect afterward, not just before it.
+	time.Sleep(400 * time.Millisecond)
+	body, err := testutil.FetchBody(context.Background(), baseURL+"/")
+	require.NoError(t, err)
+	assert.Equal(t, "pinned", body, "flag override must still win after a real file-triggered reload")
+}
+
 func TestProxyGracefulShutdown(t *testing.T) {
 	backend := testutil.NewBackend(t, "v1")
 	cfgPath := filepath.Join(t.TempDir(), "config.yaml")

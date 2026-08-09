@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -65,7 +66,7 @@ func TestWatcher_InitialLoad(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	writeAtomic(t, path, "target: http://backend-a:9000\n")
 
-	w, err := NewWatcher(path, testLogger())
+	w, err := NewWatcher(path, nil, testLogger())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = w.Close() })
 	require.Equal(t, "http://backend-a:9000", w.Current().Target)
@@ -75,7 +76,7 @@ func TestWatcher_ReloadOnAtomicRename(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	writeAtomic(t, path, "target: http://backend-a:9000\n")
 
-	w, err := NewWatcher(path, testLogger())
+	w, err := NewWatcher(path, nil, testLogger())
 	require.NoError(t, err)
 	startWatcher(t, w)
 
@@ -91,7 +92,7 @@ func TestWatcher_DebounceCoalesces(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	writeAtomic(t, path, "target: http://backend-a:9000\n")
 
-	w, err := NewWatcher(path, testLogger())
+	w, err := NewWatcher(path, nil, testLogger())
 	require.NoError(t, err)
 	w.debounce = 100 * time.Millisecond
 	startWatcher(t, w)
@@ -116,7 +117,7 @@ func TestWatcher_MalformedYAMLKeepsOldConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	writeAtomic(t, path, "target: http://backend-a:9000\n")
 
-	w, err := NewWatcher(path, testLogger())
+	w, err := NewWatcher(path, nil, testLogger())
 	require.NoError(t, err)
 	startWatcher(t, w)
 
@@ -138,7 +139,7 @@ func TestWatcher_SurvivesRemoveThenRecreate(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	writeAtomic(t, path, "target: http://backend-a:9000\n")
 
-	w, err := NewWatcher(path, testLogger())
+	w, err := NewWatcher(path, nil, testLogger())
 	require.NoError(t, err)
 	startWatcher(t, w)
 
@@ -151,4 +152,36 @@ func TestWatcher_SurvivesRemoveThenRecreate(t *testing.T) {
 		return w.Current().Target == "http://backend-b:9000"
 	})
 	assert.True(t, ok, "expected reload once the file reappears")
+}
+
+// TestWatcher_FlagOverridePersistsAcrossReload is the concrete proof of
+// the precedence contract (flag > env > file > default) applying on
+// every reload, not just the initial load: a flag-overridden field must
+// keep winning even after the file changes the same field underneath
+// it, while a field with no override must keep hot-reloading normally.
+func TestWatcher_FlagOverridePersistsAcrossReload(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	writeAtomic(t, path, "listen_addr: \":8080\"\ntarget: http://from-file:9000\n")
+
+	fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
+	RegisterFlags(fs)
+	require.NoError(t, fs.Parse([]string{"--listen-addr", ":9999"}))
+
+	w, err := NewWatcher(path, fs, testLogger())
+	require.NoError(t, err)
+	startWatcher(t, w)
+
+	require.Equal(t, ":9999", w.Current().ListenAddr, "flag override should win over the file at startup")
+	require.Equal(t, "http://from-file:9000", w.Current().Target, "non-overridden fields still come from the file")
+
+	// Change both fields in the file.
+	writeAtomic(t, path, "listen_addr: \":7000\"\ntarget: http://from-file-v2:9000\n")
+
+	ok := waitFor(t, func() bool {
+		return w.Current().Target == "http://from-file-v2:9000"
+	})
+	require.True(t, ok, "expected target (not overridden) to hot-reload from the file")
+
+	assert.Equal(t, ":9999", w.Current().ListenAddr,
+		"flag override on listen_addr must still win after the reload, even though the file changed it")
 }

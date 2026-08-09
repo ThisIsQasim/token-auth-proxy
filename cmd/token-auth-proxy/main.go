@@ -1,12 +1,13 @@
 // Command token-auth-proxy is a minimal HTTP reverse proxy: it forwards
-// every request to a single backend target defined in a YAML config file,
-// hot-reloading that target from disk without a process restart.
+// every request to a single backend target, hot-reloading that target
+// from disk without a process restart when configured via --config, or
+// taking a static target from CLI flags/environment variables otherwise
+// (see internal/config.Resolve for the precedence between them).
 package main
 
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"log/slog"
 	"net"
@@ -15,6 +16,8 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/spf13/pflag"
 
 	"github.com/ThisIsQasim/token-auth-proxy/internal/config"
 	"github.com/ThisIsQasim/token-auth-proxy/internal/proxy"
@@ -30,36 +33,53 @@ func main() {
 }
 
 func run() error {
-	configPath := flag.String("config", "", "path to YAML config file (required)")
-	flag.Parse()
-
-	if *configPath == "" {
-		flag.Usage()
-		return fmt.Errorf("usage: token-auth-proxy -config <path>")
+	fs := pflag.NewFlagSet("token-auth-proxy", pflag.ContinueOnError)
+	config.RegisterFlags(fs)
+	if err := fs.Parse(os.Args[1:]); err != nil {
+		if errors.Is(err, pflag.ErrHelp) {
+			return nil
+		}
+		return err
 	}
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
-	watcher, err := config.NewWatcher(*configPath, logger)
+	src, err := config.Resolve(fs)
 	if err != nil {
-		return fmt.Errorf("load initial config: %w", err)
+		return fmt.Errorf("resolve config: %w", err)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	var source proxy.ConfigSource
+	var watcher *config.Watcher
+
+	if src.ConfigPath != "" {
+		w, err := config.NewWatcher(src.ConfigPath, src.FlagSet, logger)
+		if err != nil {
+			return fmt.Errorf("load initial config: %w", err)
+		}
+		source, watcher = w, w
+	} else {
+		source = config.NewStaticSource(src.Config)
+		logger.Info("no --config/TAP_CONFIG set: running with a static configuration, no hot-reload")
+	}
+
 	watchCtx, cancelWatch := context.WithCancel(ctx)
 	defer cancelWatch()
-	go func() {
-		if err := watcher.Start(watchCtx); err != nil {
-			logger.Error("config watcher stopped unexpectedly", "err", err)
-		}
-	}()
+	if watcher != nil {
+		go func() {
+			if err := watcher.Start(watchCtx); err != nil {
+				logger.Error("config watcher stopped unexpectedly", "err", err)
+			}
+		}()
+	}
 
-	cfg := watcher.Current()
+	cfg := source.Current()
 	transport := proxy.BuildTransport(cfg)
-	rp := proxy.New(watcher, logger, transport)
+	rp := proxy.New(source, logger, transport)
 
 	mux := http.NewServeMux()
 	mux.Handle("/healthz", proxy.HealthzHandler())
