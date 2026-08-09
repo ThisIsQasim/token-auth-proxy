@@ -89,7 +89,9 @@ Pushing a `vX.Y.Z` tag triggers [GoReleaser](https://goreleaser.com/) to:
 - publish a GitHub Release with archives, `checksums.txt`, and a
   changelog,
 - build and push a multi-arch (`linux/amd64` + `linux/arm64`) Docker
-  image to `ghcr.io/thisisqasim/token-auth-proxy:vX.Y.Z` and `:latest`.
+  image to `ghcr.io/thisisqasim/token-auth-proxy:X.Y.Z` (note: no `v`
+  prefix on the image tag — GoReleaser's `{{ .Version }}` strips it, even
+  though the git tag itself is `vX.Y.Z`) and `:latest`.
 
 Validate release config changes locally without publishing anything:
 
