@@ -1,0 +1,19 @@
+# Address the proxy listens on. Read once at startup; changing this
+# requires a process restart to take effect.
+listen_addr: ":8080"
+
+# Backend to forward every request to. Must be an absolute http(s) URL.
+# This is the only field that hot-reloads: edit it (or replace this file
+# atomically, e.g. via `mv`) and the proxy picks up the change without a
+# restart, with no dropped in-flight requests.
+target: "http://localhost:9000"
+
+# Optional. All fields have sane defaults if omitted. Like listen_addr,
+# these are read once at startup — changing them requires a restart.
+timeouts:
+  read_header: 5s
+  read: 30s
+  write: 30s
+  idle: 120s
+  dial: 5s
+  response_header: 15s

@@ -1,0 +1,14 @@
+.git
+.github
+.gitea
+test
+dist
+bin
+*.md
+.pre-commit-config.yaml
+.golangci.yml
+.goreleaser.yaml
+coverage.*
+*.out
+load-test-report.json
+.env
