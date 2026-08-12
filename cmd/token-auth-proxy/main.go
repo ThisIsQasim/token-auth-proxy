@@ -78,6 +78,12 @@ func run() error {
 	}
 
 	cfg := source.Current()
+	if cfg.Inbound.Auth.Enabled() {
+		logger.Warn("a jwt or saml source is configured (and enabled), but verification is not implemented in this build yet — no request is being authenticated or rejected",
+			"jwt_sources", len(cfg.Inbound.Auth.JWT),
+			"saml_configured_with_unserved_acs_path", cfg.Inbound.Auth.SAML != nil)
+	}
+
 	transport := proxy.BuildTransport(cfg)
 	rp := proxy.New(source, logger, transport)
 

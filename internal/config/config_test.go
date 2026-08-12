@@ -108,6 +108,81 @@ func TestApplyDefaults_TimeoutsRetainOverrides(t *testing.T) {
 	assert.Equal(t, defaultResponseHeaderTimeout, cfg.Timeouts.ResponseHeader)
 }
 
+// TestLoad_AuthSourcesRoundTrip is the concrete proof that koanf/
+// mapstructure correctly decodes two differently-shaped YAML
+// lists-of-maps — including one with a nested list-of-structs field —
+// into []JWTSource/[]SAMLSource, not just an assumption.
+func TestLoad_AuthSourcesRoundTrip(t *testing.T) {
+	t.Setenv("TAP_TEST_SAML_SESSION_KEY", "secret")
+
+	yamlConfig := `
+target: http://localhost:9000
+inbound:
+  auth:
+    jwt:
+      - name: jwks-source
+        issuer: https://issuer-a.example.com
+        jwks_url: https://issuer-a.example.com/jwks.json
+      - name: oidc-source
+        issuer: https://issuer-b.example.com
+        oidc_discovery_url: https://issuer-b.example.com/.well-known/openid-configuration
+        jwks_cache_ttl: 10m
+        disabled: true
+        credentials:
+          - location: header
+            name: Authorization
+            prefix: "Bearer "
+          - location: cookie
+            name: session
+    saml:
+      name: corp-sso
+      issuer: https://idp.example.com/metadata
+      idp_metadata_url: https://idp.example.com/metadata
+      sp_entity_id: https://proxy.example.com/saml/metadata
+      acs_path: /saml/corp-sso/acs
+      session_cookie: corp_sso_session
+      session_signing_key_env: TAP_TEST_SAML_SESSION_KEY
+`
+	path := writeTempConfig(t, yamlConfig)
+	cfg, err := loadLayered(path, nil)
+	require.NoError(t, err)
+
+	require.Len(t, cfg.Inbound.Auth.JWT, 2)
+
+	jwks := cfg.Inbound.Auth.JWT[0]
+	assert.Equal(t, "jwks-source", jwks.Name)
+	assert.Equal(t, "https://issuer-a.example.com", jwks.Issuer)
+	assert.Equal(t, "https://issuer-a.example.com/jwks.json", jwks.JWKSURL)
+	assert.False(t, jwks.Disabled)
+	assert.Equal(t, []string{"RS256"}, jwks.Algorithms, "defaulted")
+	assert.Equal(t,
+		[]CredentialLocation{{Location: "header", Name: "Authorization", Prefix: "Bearer "}},
+		jwks.Credentials, "defaulted")
+
+	oidc := cfg.Inbound.Auth.JWT[1]
+	assert.Equal(t, "oidc-source", oidc.Name)
+	assert.Equal(t, "https://issuer-b.example.com", oidc.Issuer)
+	assert.Equal(t, "https://issuer-b.example.com/.well-known/openid-configuration", oidc.OIDCDiscoveryURL)
+	assert.True(t, oidc.Disabled)
+	assert.Equal(t, 10*time.Minute, oidc.JWKSCacheTTL)
+	require.Len(t, oidc.Credentials, 2)
+	assert.Equal(t, CredentialLocation{Location: "header", Name: "Authorization", Prefix: "Bearer "}, oidc.Credentials[0])
+	assert.Equal(t, CredentialLocation{Location: "cookie", Name: "session"}, oidc.Credentials[1])
+
+	require.NotNil(t, cfg.Inbound.Auth.SAML)
+	saml := cfg.Inbound.Auth.SAML
+	assert.Equal(t, "corp-sso", saml.Name)
+	assert.Equal(t, "https://idp.example.com/metadata", saml.Issuer)
+	assert.Equal(t, "https://idp.example.com/metadata", saml.IDPMetadataURL)
+	assert.Equal(t, "https://proxy.example.com/saml/metadata", saml.SPEntityID)
+	assert.Equal(t, "/saml/corp-sso/acs", saml.ACSPath)
+	assert.Equal(t, "corp_sso_session", saml.SessionCookie)
+	assert.Equal(t, "TAP_TEST_SAML_SESSION_KEY", saml.SessionSigningKeyEnv)
+	assert.Equal(t, defaultSessionDuration, saml.SessionDuration, "defaulted")
+
+	assert.True(t, cfg.Inbound.Auth.Enabled(), "jwks-source and corp-sso are both non-disabled")
+}
+
 func TestApplyDefaults_AllTimeoutsDefaulted(t *testing.T) {
 	path := writeTempConfig(t, "target: http://localhost:9000\n")
 	cfg, err := loadLayered(path, nil)

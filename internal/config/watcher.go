@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"reflect"
 	"sync/atomic"
 	"time"
 
@@ -196,10 +197,10 @@ func (w *Watcher) retryAddDir(ctx context.Context) {
 
 // reload re-reads and re-validates the config file from disk, re-applying
 // the override layer (if any) on top exactly as NewWatcher's initial load
-// did. On success it publishes the new Config and warns if anything
-// besides Target changed (those fields require a restart to take
-// effect). On failure it logs and leaves the previously published Config
-// untouched.
+// did. On success it publishes the new Config and warns if ListenAddr or
+// Timeouts changed — those two fields require a restart to take effect,
+// everything else hot-reloads. On failure it logs and leaves the
+// previously published Config untouched.
 func (w *Watcher) reload() {
 	next, err := loadLayered(w.path, w.fs)
 	if err != nil {
@@ -209,13 +210,35 @@ func (w *Watcher) reload() {
 
 	prev := w.current.Load()
 	if prev != nil && (prev.ListenAddr != next.ListenAddr || prev.Timeouts != next.Timeouts) {
-		w.logger.Warn("listen_addr/timeouts changed but only target is hot-reloaded; restart the process to apply them")
+		w.logger.Warn("listen_addr/timeouts changed but everything else hot-reloads; restart the process to apply them")
 	}
 
 	w.current.Store(next)
 	w.reloadN.Add(1)
 
-	if prev == nil || prev.Target != next.Target {
-		w.logger.Info("config reloaded", "target", next.Target)
+	if prev == nil || hotReloadableFieldsChanged(prev, next) {
+		w.logger.Info("config reloaded",
+			"target", next.Target,
+			"auth_enabled", next.Inbound.Auth.Enabled(),
+			"jwt_sources", len(next.Inbound.Auth.JWT),
+			"saml_configured", next.Inbound.Auth.SAML != nil)
 	}
+}
+
+// hotReloadableFieldsChanged reports whether prev and next differ in
+// any field other than ListenAddr/Timeouts — the two fields that are
+// NOT hot-reloaded (see Config's doc comment and the restart-required
+// warning above). Checking by exclusion like this, rather than
+// enumerating every hot-reloadable field individually, means a future
+// field added to Config is automatically covered here with no matching
+// update needed: it either requires a restart (added to the exclusion
+// below, alongside the warning check above) or it hot-reloads and this
+// already detects it changing. reflect.DeepEqual is required (not !=)
+// since Config contains slice/pointer fields (Inbound.Auth.JWT,
+// Inbound.Auth.SAML), which aren't comparable with ==.
+func hotReloadableFieldsChanged(prev, next *Config) bool {
+	p, n := *prev, *next
+	p.ListenAddr, n.ListenAddr = "", ""
+	p.Timeouts, n.Timeouts = TimeoutConfig{}, TimeoutConfig{}
+	return !reflect.DeepEqual(p, n)
 }

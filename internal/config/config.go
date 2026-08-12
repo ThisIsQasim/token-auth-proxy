@@ -35,13 +35,19 @@ type TimeoutConfig struct {
 
 // Config is the proxy's configuration, as loaded from a YAML file.
 //
-// Only Target is hot-reloaded while the process is running: ListenAddr and
-// Timeouts are consumed once at startup to build the listener and outbound
-// transport, and changing them requires a process restart.
+// ListenAddr and Timeouts are the only fields that don't hot-reload:
+// they're consumed once at startup to build the listener and outbound
+// transport, so changing them requires a process restart. Every other
+// field (Target, Inbound.Auth) hot-reloads while the process is
+// running — see Watcher.reload, which detects a hot-reloadable change
+// by excluding just these two fields rather than enumerating the rest,
+// so a future field added here needs no matching update there.
 type Config struct {
-	ListenAddr string        `yaml:"listen_addr"`
-	Target     string        `yaml:"target"`
-	Timeouts   TimeoutConfig `yaml:"timeouts,omitempty"`
+	ListenAddr string         `yaml:"listen_addr"`
+	Target     string         `yaml:"target"`
+	Timeouts   TimeoutConfig  `yaml:"timeouts,omitempty"`
+	Inbound    InboundConfig  `yaml:"inbound,omitempty"`
+	Outbound   OutboundConfig `yaml:"outbound,omitempty"`
 
 	targetURL *url.URL
 }
@@ -69,6 +75,7 @@ func (c *Config) applyDefaults() {
 	if c.Timeouts.ResponseHeader == 0 {
 		c.Timeouts.ResponseHeader = defaultResponseHeaderTimeout
 	}
+	c.Inbound.applyDefaults()
 }
 
 // Validate checks the config for correctness and, on success, caches the
@@ -82,15 +89,13 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("target is required")
 	}
 
-	u, err := url.ParseRequestURI(c.Target)
+	u, err := parseAbsoluteHTTPURL("target", c.Target)
 	if err != nil {
-		return fmt.Errorf("target %q: %w", c.Target, err)
+		return err
 	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return fmt.Errorf("target %q: scheme must be http or https, got %q", c.Target, u.Scheme)
-	}
-	if u.Host == "" {
-		return fmt.Errorf("target %q: missing host", c.Target)
+
+	if err := c.Inbound.Validate(); err != nil {
+		return err
 	}
 
 	c.targetURL = u
@@ -101,4 +106,23 @@ func (c *Config) Validate() error {
 // Validate has succeeded.
 func (c *Config) TargetURL() *url.URL {
 	return c.targetURL
+}
+
+// parseAbsoluteHTTPURL parses raw as an absolute http(s) URL, returning
+// an error that names field (e.g. "target", "jwks_url") on failure.
+// Shared by Config.Validate and JWTSource/SAMLSource's own validation so
+// the same rule — and the same error message shape — isn't duplicated
+// per caller.
+func parseAbsoluteHTTPURL(field, raw string) (*url.URL, error) {
+	u, err := url.ParseRequestURI(raw)
+	if err != nil {
+		return nil, fmt.Errorf("%s %q: %w", field, raw, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil, fmt.Errorf("%s %q: scheme must be http or https, got %q", field, raw, u.Scheme)
+	}
+	if u.Host == "" {
+		return nil, fmt.Errorf("%s %q: missing host", field, raw)
+	}
+	return u, nil
 }

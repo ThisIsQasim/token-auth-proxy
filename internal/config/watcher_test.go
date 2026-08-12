@@ -1,11 +1,13 @@
 package config
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,6 +18,33 @@ import (
 
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+// syncBuffer wraps bytes.Buffer with a mutex: the watcher's reload
+// logging happens on its own goroutine (see Start), so a test reading
+// the buffer's contents from the main goroutine needs to synchronize
+// with that, not just bytes.Buffer's own (non-concurrency-safe) methods.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// bufferLogger is like testLogger but writes to buf so a test can assert
+// on the actual log output rather than just the resulting Config.
+func bufferLogger(buf *syncBuffer) *slog.Logger {
+	return slog.New(slog.NewTextHandler(buf, nil))
 }
 
 func writeAtomic(t *testing.T, path, contents string) {
@@ -184,4 +213,115 @@ func TestWatcher_FlagOverridePersistsAcrossReload(t *testing.T) {
 
 	assert.Equal(t, ":9999", w.Current().ListenAddr,
 		"flag override on listen_addr must still win after the reload, even though the file changed it")
+}
+
+// TestWatcher_AuthHotReloads is a regression test for the
+// reflect.DeepEqual fix in reload(): without it, adding an inbound.auth
+// block wouldn't log "config reloaded" at all, since Target doesn't
+// change. It also proves Disabled is honored live, and that
+// InboundAuthConfig.Enabled() flows through a hot-reload's result.
+func TestWatcher_AuthHotReloads(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	writeAtomic(t, path, "target: http://backend-a:9000\n")
+
+	buf := &syncBuffer{}
+	w, err := NewWatcher(path, nil, bufferLogger(buf))
+	require.NoError(t, err)
+	startWatcher(t, w)
+
+	require.False(t, w.Current().Inbound.Auth.Enabled(), "no auth configured yet")
+
+	writeAtomic(t, path, `
+target: http://backend-a:9000
+inbound:
+  auth:
+    jwt:
+      - name: jwt-a
+        issuer: https://issuer.example.com
+        jwks_url: https://issuer.example.com/jwks.json
+`)
+
+	ok := waitFor(t, func() bool {
+		return w.Current().Inbound.Auth.Enabled() && len(w.Current().Inbound.Auth.JWT) == 1
+	})
+	require.True(t, ok, "expected the new jwt source to hot-reload in")
+
+	logs := buf.String()
+	assert.Contains(t, logs, "config reloaded", "an inbound.auth-only change must still trigger the reload log")
+	assert.NotContains(t, logs, "restart the process", "inbound.auth is hot-reloaded, not restart-required")
+
+	_, found := w.Current().Inbound.Auth.JWTSourceByIssuer("https://issuer.example.com")
+	assert.True(t, found)
+
+	// Disable the only source; Enabled() must flip back to false, and
+	// the lookup must stop finding it.
+	writeAtomic(t, path, `
+target: http://backend-a:9000
+inbound:
+  auth:
+    jwt:
+      - name: jwt-a
+        issuer: https://issuer.example.com
+        jwks_url: https://issuer.example.com/jwks.json
+        disabled: true
+`)
+
+	ok = waitFor(t, func() bool {
+		return !w.Current().Inbound.Auth.Enabled()
+	})
+	assert.True(t, ok, "expected Enabled() to flip to false once the only source is disabled")
+
+	_, found = w.Current().Inbound.Auth.JWTSourceByIssuer("https://issuer.example.com")
+	assert.False(t, found, "a disabled source must not be found by lookup after a hot-reload")
+}
+
+// TestWatcher_JSONListOverridePersistsAcrossReload mirrors
+// TestWatcher_FlagOverridePersistsAcrossReload for the JSON-blob
+// override: TAP_INBOUND_AUTH_JWT_JSON must keep winning over the file's
+// own inbound.auth.jwt across a real reload, not just at startup.
+func TestWatcher_JSONListOverridePersistsAcrossReload(t *testing.T) {
+	t.Setenv("TAP_INBOUND_AUTH_JWT_JSON", `[{"name":"from-env","issuer":"https://env.example.com","jwks_url":"https://env.example.com/jwks.json"}]`)
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	writeAtomic(t, path, `
+target: http://backend-a:9000
+inbound:
+  auth:
+    jwt:
+      - name: from-file
+        issuer: https://file.example.com
+        jwks_url: https://file.example.com/jwks.json
+`)
+
+	fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
+	RegisterFlags(fs)
+	require.NoError(t, fs.Parse(nil))
+
+	w, err := NewWatcher(path, fs, testLogger())
+	require.NoError(t, err)
+	startWatcher(t, w)
+
+	require.Len(t, w.Current().Inbound.Auth.JWT, 1)
+	require.Equal(t, "from-env", w.Current().Inbound.Auth.JWT[0].Name, "env override should win over the file at startup")
+
+	// Change the file's list; the env override must still win after a
+	// real reload, not just at the initial load.
+	writeAtomic(t, path, `
+target: http://backend-a:9000
+inbound:
+  auth:
+    jwt:
+      - name: from-file-v2
+        issuer: https://file-v2.example.com
+        jwks_url: https://file-v2.example.com/jwks.json
+`)
+
+	ok := waitFor(t, func() bool {
+		return w.ReloadCount() > 0
+	})
+	require.True(t, ok, "expected a reload to happen")
+
+	require.Len(t, w.Current().Inbound.Auth.JWT, 1)
+	assert.Equal(t, "from-env", w.Current().Inbound.Auth.JWT[0].Name,
+		"env override on inbound.auth.jwt must still win after the reload, even though the file changed it")
 }

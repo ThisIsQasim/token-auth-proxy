@@ -21,3 +21,67 @@ timeouts:
   idle: 120s
   dial: 5s
   response_header: 15s
+
+# Optional. Describes trusted token sources so the proxy can eventually
+# verify incoming credentials — this is schema only for now: nothing
+# here is enforced yet (including: SAML acs_paths below are not
+# actually served). Like target, inbound.auth hot-reloads with no
+# process restart.
+#
+# jwt/saml can also be set (or overridden) via --inbound-auth-jwt-json/
+# TAP_INBOUND_AUTH_JWT_JSON (a JSON array, fully replacing the jwt list)
+# and --inbound-auth-saml-json/TAP_INBOUND_AUTH_SAML_JSON (a JSON
+# object, fully replacing the saml source) — see the README's Auth
+# section. Both forms share the same field names.
+#
+# jwt is a list (multiple trusted issuers); saml is at most one source,
+# not a list — see the README's Auth section for why.
+#
+# There is no separate "enabled" key: adding a jwt source below that
+# isn't disabled, or the saml source if present and not disabled, turns
+# verification on immediately once a future pass implements enforcement.
+# To stage a fully-written jwt list (or the saml source) without going
+# live, mark every entry disabled: true.
+#
+# Commented out entirely so the default `make run` config stays fully
+# functional without a real JWKS or IdP endpoint on hand.
+# inbound:
+#   auth:
+#     jwt:
+#       # algorithms/credentials both omitted here — they default to
+#       # ["RS256"] and [{header, Authorization, "Bearer "}] respectively.
+#       - name: internal-k8s
+#         issuer: "https://kubernetes.default.svc"
+#         jwks_url: "https://kubernetes.default.svc/openid/v1/jwks"
+#         audiences: ["token-auth-proxy"]
+#
+#       - name: partner-oidc
+#         issuer: "https://partner.example.com"
+#         oidc_discovery_url: "https://partner.example.com/.well-known/openid-configuration"
+#         algorithms: ["RS256", "ES256"]
+#         # Credentials is a list, tried in order: header first, then a
+#         # cookie fallback for browser-originated requests.
+#         credentials:
+#           - location: header
+#             name: Authorization
+#             prefix: "Bearer "
+#           - location: cookie
+#             name: partner_session
+#         jwks_cache_ttl: 10m
+#         disabled: true # staged, not live yet
+#
+#     saml:
+#       name: corp-sso
+#       issuer: "https://idp.corp.example.com/metadata" # the IdP's entity ID
+#       idp_metadata_url: "https://idp.corp.example.com/metadata"
+#       sp_entity_id: "https://proxy.example.com/saml/metadata"
+#       acs_path: "/saml/corp-sso/acs"
+#       session_cookie: "corp_sso_session"
+#       # Names an environment variable holding the session-signing
+#       # key — never the key itself in this file. It must already be
+#       # set for the proxy to start; here it'd need to be, e.g.,
+#       # `export CORP_SSO_SESSION_KEY=...` before running.
+#       session_signing_key_env: "CORP_SSO_SESSION_KEY"
+#       session_duration: 8h
+#
+# outbound: {} # reserved for later: rewriting credentials on the backend leg

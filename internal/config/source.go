@@ -1,7 +1,9 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/knadh/koanf/parsers/yaml"
@@ -64,6 +66,32 @@ func init() {
 	}
 }
 
+// jsonFieldSpec describes one inbound.auth field overridable via a
+// JSON-valued flag/env var — a JSON array for inbound.auth.jwt (a
+// list), a JSON object for inbound.auth.saml (a single optional
+// source). koanf's flat-key env/flag providers have no way to express
+// either shape (see loadJSONFieldOverrides' doc comment for why), so
+// these two fields are deliberately kept out of
+// fieldSpecs/envToKey/flagToKey — that table assumes every entry is a
+// flat scalar the generic env/posflag providers can decode identically,
+// which doesn't hold here. Being absent from those maps also means the
+// generic providers' callbacks (envKey/flagKey) simply ignore these two
+// flags/env vars on their own, since an unrecognized name maps to "" and
+// both providers skip empty keys.
+type jsonFieldSpec struct {
+	koanfKey string
+	flagName string
+	envName  string
+	usage    string
+}
+
+var jsonFieldSpecs = []jsonFieldSpec{
+	{koanfKey: "inbound.auth.jwt", flagName: "inbound-auth-jwt-json", envName: "INBOUND_AUTH_JWT_JSON",
+		usage: "JSON array fully replacing inbound.auth.jwt (env TAP_INBOUND_AUTH_JWT_JSON)"},
+	{koanfKey: "inbound.auth.saml", flagName: "inbound-auth-saml-json", envName: "INBOUND_AUTH_SAML_JSON",
+		usage: "JSON object fully replacing inbound.auth.saml (env TAP_INBOUND_AUTH_SAML_JSON)"},
+}
+
 // RegisterFlags registers every recognized flag on fs with a zero-value
 // default. Defaults are deliberately not baked in here: Config.applyDefaults
 // fills them in later, once the file/env/flag layers have all been merged
@@ -75,6 +103,9 @@ func RegisterFlags(fs *pflag.FlagSet) {
 		} else {
 			fs.String(f.flagName, "", f.usage)
 		}
+	}
+	for _, f := range jsonFieldSpecs {
+		fs.String(f.flagName, "", f.usage)
 	}
 }
 
@@ -132,6 +163,73 @@ func loadOverrides(k *koanf.Koanf, fs *pflag.FlagSet) error {
 	}
 	if err := k.Load(posflag.ProviderWithFlag(fs, ".", k, flagKey(fs)), nil); err != nil {
 		return fmt.Errorf("read flags: %w", err)
+	}
+	if err := loadJSONFieldOverrides(k, fs); err != nil {
+		return err
+	}
+	return nil
+}
+
+// jsonOverrideValue returns the raw override string for spec — a flag
+// (if explicitly set) wins over its env var, mirroring every other
+// field's flag > env precedence — or ("", false) if neither is set, in
+// which case the caller must leave whatever the file layer already
+// loaded for that key completely untouched.
+func jsonOverrideValue(fs *pflag.FlagSet, spec jsonFieldSpec) (string, bool) {
+	if fs != nil {
+		if f := fs.Lookup(spec.flagName); f != nil && f.Changed {
+			return f.Value.String(), true
+		}
+	}
+	if v, ok := os.LookupEnv(envPrefix + spec.envName); ok {
+		return v, true
+	}
+	return "", false
+}
+
+// decodeJSONValue parses raw as literal JSON (an array for
+// inbound.auth.jwt, an object for inbound.auth.saml — see jsonFieldSpecs).
+// The result is left as a generic any rather than decoded straight into
+// []JWTSource/*SAMLSource, so it can be handed to koanf and flow through
+// the exact same UnmarshalWithConf call — and therefore the same
+// "yaml"-tagged field names and duration-string parsing — as the YAML
+// file path already uses. A value of the wrong shape (e.g. an object
+// where jwt expects an array) parses fine here and is instead rejected
+// later by that UnmarshalWithConf/Validate step, same as a malformed
+// YAML file would be.
+func decodeJSONValue(spec jsonFieldSpec, raw string) (any, error) {
+	var parsed any
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		return nil, fmt.Errorf("%s: invalid JSON: %w", spec.koanfKey, err)
+	}
+	return parsed, nil
+}
+
+// loadJSONFieldOverrides applies the JSON-blob overrides for
+// inbound.auth.jwt and inbound.auth.saml. koanf's flat-key env/flag
+// providers have no way to express either "a list of structs" or "an
+// optional nested struct" as a single key=value pair — env.Provider's
+// TransformFunc and posflag's callback each return one scalar value per
+// key, and even koanf's own delimiter-based key nesting
+// (maps.Unflatten) only ever builds nested maps, never slices — so
+// these two fields are handled here instead, entirely outside the
+// generic env/flag mechanism, by parsing JSON and injecting the result
+// as an already-shaped value via k.Set. A value here fully replaces
+// whatever the file layer set for that key, the same "override wins
+// outright" semantics every other field already has.
+func loadJSONFieldOverrides(k *koanf.Koanf, fs *pflag.FlagSet) error {
+	for _, spec := range jsonFieldSpecs {
+		raw, ok := jsonOverrideValue(fs, spec)
+		if !ok {
+			continue
+		}
+		parsed, err := decodeJSONValue(spec, raw)
+		if err != nil {
+			return err
+		}
+		if err := k.Set(spec.koanfKey, parsed); err != nil {
+			return fmt.Errorf("%s: %w", spec.koanfKey, err)
+		}
 	}
 	return nil
 }
