@@ -1,7 +1,14 @@
 package config
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,15 +28,19 @@ func validJWTSource() JWTSource {
 	return j
 }
 
+// validSAMLSessionKey is 32 bytes, satisfying minSessionSigningKeyLen.
+const validSAMLSessionKey = "01234567890123456789012345678901"
+
 // validSAMLSource returns a fresh, already-defaulted, valid SAMLSource
 // whose SessionSigningKeyEnv is guaranteed set via t.Setenv.
 func validSAMLSource(t *testing.T) SAMLSource {
 	t.Helper()
-	t.Setenv("SAML_TEST_SESSION_KEY", "secret")
+	t.Setenv("SAML_TEST_SESSION_KEY", validSAMLSessionKey)
 	s := SAMLSource{
 		Name:                 "saml-a",
 		Issuer:               "https://idp.example.com/metadata",
 		IDPMetadataURL:       "https://idp.example.com/metadata",
+		SPBaseURL:            "https://proxy.example.com",
 		SPEntityID:           "https://proxy.example.com/saml/metadata",
 		ACSPath:              "/saml/saml-a/acs",
 		SessionCookie:        "saml_a_session",
@@ -37,6 +48,43 @@ func validSAMLSource(t *testing.T) SAMLSource {
 	}
 	s.applyDefaults()
 	return s
+}
+
+// testSPRSAKey is cached per process, same rationale as
+// internal/authn's identical sharedRSAKey/sharedSAMLIDPKey pattern:
+// real RSA keygen is slow enough to matter across many test cases.
+var testSPRSAKey = sync.OnceValues(func() (*rsa.PrivateKey, error) {
+	return rsa.GenerateKey(rand.Reader, 2048)
+})
+
+// testSPCertPEM returns a PEM-encoded, self-signed X.509 certificate
+// for priv.
+func testSPCertPEM(t *testing.T, priv *rsa.PrivateKey) string {
+	t.Helper()
+	serial, err := rand.Int(rand.Reader, big.NewInt(1<<62))
+	require.NoError(t, err)
+	template := &x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: "test-sp"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &priv.PublicKey, priv)
+	require.NoError(t, err)
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+}
+
+// testSPKeyCertPEM returns a matching PEM-encoded RSA private key
+// (PKCS#1) and self-signed certificate, for sp_key_env/sp_cert test
+// cases.
+func testSPKeyCertPEM(t *testing.T) (keyPEM, certPEM string) {
+	t.Helper()
+	priv, err := testSPRSAKey()
+	require.NoError(t, err)
+	keyPEM = string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(priv)}))
+	return keyPEM, testSPCertPEM(t, priv)
 }
 
 func TestJWTSource_Validate(t *testing.T) {
@@ -173,12 +221,28 @@ func TestSAMLSource_Validate(t *testing.T) {
 			wantErr: true, errSubstr: "idp_metadata_url is required",
 		},
 		{
+			name: "missing sp_base_url", mutate: func(s *SAMLSource) { s.SPBaseURL = "" },
+			wantErr: true, errSubstr: "sp_base_url is required",
+		},
+		{
+			name: "relative sp_base_url", mutate: func(s *SAMLSource) { s.SPBaseURL = "/proxy" },
+			wantErr: true, errSubstr: "sp_base_url",
+		},
+		{
 			name: "missing sp_entity_id", mutate: func(s *SAMLSource) { s.SPEntityID = "" },
 			wantErr: true, errSubstr: "sp_entity_id is required",
 		},
 		{
 			name: "missing acs_path", mutate: func(s *SAMLSource) { s.ACSPath = "" },
 			wantErr: true, errSubstr: "acs_path is required",
+		},
+		{
+			name: "acs_path without leading slash", mutate: func(s *SAMLSource) { s.ACSPath = "saml/acs" },
+			wantErr: true, errSubstr: "must begin with",
+		},
+		{
+			name: "acs_path is /healthz", mutate: func(s *SAMLSource) { s.ACSPath = "/healthz" },
+			wantErr: true, errSubstr: "/healthz",
 		},
 		{
 			name: "missing session_cookie", mutate: func(s *SAMLSource) { s.SessionCookie = "" },
@@ -194,6 +258,79 @@ func TestSAMLSource_Validate(t *testing.T) {
 				s.SessionSigningKeyEnv = "SAML_TEST_SESSION_KEY_NOT_SET"
 			},
 			wantErr: true, errSubstr: "is not set",
+		},
+		{
+			name: "session_signing_key_env value too short",
+			mutate: func(s *SAMLSource) {
+				t.Setenv("SAML_TEST_SESSION_KEY_SHORT", "too-short")
+				s.SessionSigningKeyEnv = "SAML_TEST_SESSION_KEY_SHORT"
+			},
+			wantErr: true, errSubstr: "must be at least 32 bytes",
+		},
+		{
+			name: "sp_key_env without sp_cert",
+			mutate: func(s *SAMLSource) {
+				s.SPKeyEnv = "SAML_TEST_SP_KEY"
+			},
+			wantErr: true, errSubstr: "must be set together",
+		},
+		{
+			name: "sp_cert without sp_key_env",
+			mutate: func(s *SAMLSource) {
+				_, certPEM := testSPKeyCertPEM(t)
+				s.SPCert = certPEM
+			},
+			wantErr: true, errSubstr: "must be set together",
+		},
+		{
+			name: "sp_key_env names an unset env var",
+			mutate: func(s *SAMLSource) {
+				_, certPEM := testSPKeyCertPEM(t)
+				s.SPKeyEnv = "SAML_TEST_SP_KEY_NOT_SET"
+				s.SPCert = certPEM
+			},
+			wantErr: true, errSubstr: "is not set",
+		},
+		{
+			name: "sp_key_env value is not valid PEM",
+			mutate: func(s *SAMLSource) {
+				_, certPEM := testSPKeyCertPEM(t)
+				t.Setenv("SAML_TEST_SP_KEY_MALFORMED", "not a pem key")
+				s.SPKeyEnv = "SAML_TEST_SP_KEY_MALFORMED"
+				s.SPCert = certPEM
+			},
+			wantErr: true, errSubstr: "sp_key_env",
+		},
+		{
+			name: "sp_cert is not valid PEM",
+			mutate: func(s *SAMLSource) {
+				keyPEM, _ := testSPKeyCertPEM(t)
+				t.Setenv("SAML_TEST_SP_KEY_VALID", keyPEM)
+				s.SPKeyEnv = "SAML_TEST_SP_KEY_VALID"
+				s.SPCert = "not a pem cert"
+			},
+			wantErr: true, errSubstr: "sp_cert",
+		},
+		{
+			name: "sp_cert public key does not match sp_key_env",
+			mutate: func(s *SAMLSource) {
+				keyPEM, _ := testSPKeyCertPEM(t)
+				other, err := rsa.GenerateKey(rand.Reader, 2048)
+				require.NoError(t, err)
+				t.Setenv("SAML_TEST_SP_KEY_MISMATCH", keyPEM)
+				s.SPKeyEnv = "SAML_TEST_SP_KEY_MISMATCH"
+				s.SPCert = testSPCertPEM(t, other)
+			},
+			wantErr: true, errSubstr: "does not match",
+		},
+		{
+			name: "valid sp_key_env/sp_cert pair",
+			mutate: func(s *SAMLSource) {
+				keyPEM, certPEM := testSPKeyCertPEM(t)
+				t.Setenv("SAML_TEST_SP_KEY_OK", keyPEM)
+				s.SPKeyEnv = "SAML_TEST_SP_KEY_OK"
+				s.SPCert = certPEM
+			},
 		},
 	}
 
@@ -260,6 +397,24 @@ func TestInboundAuthConfig_Validate(t *testing.T) {
 		a := InboundAuthConfig{JWT: []JWTSource{jwt}}
 		assert.NoError(t, a.Validate(), "a nil SAML source must not be validated or otherwise rejected")
 	})
+
+	t.Run("jwt credentials cookie collides with saml session_cookie", func(t *testing.T) {
+		jwt := validJWTSource()
+		saml := validSAMLSource(t)
+		jwt.Credentials = []CredentialLocation{{Location: "cookie", Name: saml.SessionCookie}}
+
+		a := InboundAuthConfig{JWT: []JWTSource{jwt}, SAML: &saml}
+		assert.ErrorContains(t, a.Validate(), "collides with inbound.auth.saml.session_cookie")
+	})
+
+	t.Run("jwt cookie credential with a different name than session_cookie is fine", func(t *testing.T) {
+		jwt := validJWTSource()
+		saml := validSAMLSource(t)
+		jwt.Credentials = []CredentialLocation{{Location: "cookie", Name: "not_" + saml.SessionCookie}}
+
+		a := InboundAuthConfig{JWT: []JWTSource{jwt}, SAML: &saml}
+		assert.NoError(t, a.Validate())
+	})
 }
 
 func TestInboundAuthConfig_Enabled(t *testing.T) {
@@ -309,6 +464,79 @@ func TestInboundAuthConfig_Enabled(t *testing.T) {
 	}
 }
 
+// TestInboundAuthConfig_JWTEnabled is the regression guard for JWT
+// verification enforcement being scoped strictly to JWT sources: a
+// SAML-only config must report Enabled()==true (something is
+// configured) but JWTEnabled()==false (nothing here should ever cause
+// the JWT middleware to start rejecting requests), since SAML
+// verification isn't implemented.
+func TestInboundAuthConfig_JWTEnabled(t *testing.T) {
+	tests := []struct {
+		name string
+		a    InboundAuthConfig
+		want bool
+	}{
+		{name: "zero sources", a: InboundAuthConfig{}, want: false},
+		{
+			name: "one non-disabled jwt source",
+			a:    InboundAuthConfig{JWT: []JWTSource{{Name: "j"}}},
+			want: true,
+		},
+		{
+			name: "all jwt sources disabled",
+			a:    InboundAuthConfig{JWT: []JWTSource{{Name: "j", Disabled: true}}},
+			want: false,
+		},
+		{
+			name: "SAML-only, enabled: Enabled() true but JWTEnabled() must stay false",
+			a:    InboundAuthConfig{SAML: &SAMLSource{Name: "s"}},
+			want: false,
+		},
+		{
+			name: "SAML enabled and a disabled jwt source",
+			a: InboundAuthConfig{
+				JWT:  []JWTSource{{Name: "j", Disabled: true}},
+				SAML: &SAMLSource{Name: "s"},
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.a.JWTEnabled())
+		})
+	}
+
+	t.Run("SAML-only config: Enabled true, JWTEnabled false", func(t *testing.T) {
+		a := InboundAuthConfig{SAML: &SAMLSource{Name: "s"}}
+		assert.True(t, a.Enabled(), "a configured, non-disabled SAML source makes Enabled true")
+		assert.False(t, a.JWTEnabled(), "but must never make JWTEnabled true")
+	})
+}
+
+func TestInboundAuthConfig_SAMLEnabled(t *testing.T) {
+	tests := []struct {
+		name string
+		a    InboundAuthConfig
+		want bool
+	}{
+		{name: "no saml source", a: InboundAuthConfig{}, want: false},
+		{name: "saml source configured, not disabled", a: InboundAuthConfig{SAML: &SAMLSource{Name: "s"}}, want: true},
+		{
+			name: "saml source configured but disabled",
+			a:    InboundAuthConfig{SAML: &SAMLSource{Name: "s", Disabled: true}},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.a.SAMLEnabled())
+		})
+	}
+}
+
 func TestJWTSource_ApplyDefaults(t *testing.T) {
 	t.Run("all zero/empty fields get defaulted", func(t *testing.T) {
 		var j JWTSource
@@ -347,6 +575,18 @@ func TestSAMLSource_ApplyDefaults(t *testing.T) {
 		s := SAMLSource{SessionDuration: 8 * time.Hour}
 		s.applyDefaults()
 		assert.Equal(t, 8*time.Hour, s.SessionDuration)
+	})
+
+	t.Run("zero idp_metadata_cache_ttl gets defaulted", func(t *testing.T) {
+		var s SAMLSource
+		s.applyDefaults()
+		assert.Equal(t, defaultIDPMetadataCacheTTL, s.IDPMetadataCacheTTL)
+	})
+
+	t.Run("explicit idp_metadata_cache_ttl survives", func(t *testing.T) {
+		s := SAMLSource{IDPMetadataCacheTTL: 15 * time.Minute}
+		s.applyDefaults()
+		assert.Equal(t, 15*time.Minute, s.IDPMetadataCacheTTL)
 	})
 }
 

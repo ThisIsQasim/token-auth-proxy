@@ -14,11 +14,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/spf13/pflag"
 
+	"github.com/ThisIsQasim/token-auth-proxy/internal/authn"
 	"github.com/ThisIsQasim/token-auth-proxy/internal/config"
 	"github.com/ThisIsQasim/token-auth-proxy/internal/proxy"
 )
@@ -78,18 +80,46 @@ func run() error {
 	}
 
 	cfg := source.Current()
-	if cfg.Inbound.Auth.Enabled() {
-		logger.Warn("a jwt or saml source is configured (and enabled), but verification is not implemented in this build yet — no request is being authenticated or rejected",
-			"jwt_sources", len(cfg.Inbound.Auth.JWT),
-			"saml_configured_with_unserved_acs_path", cfg.Inbound.Auth.SAML != nil)
+	if cfg.Inbound.Auth.JWTEnabled() {
+		logger.Info("jwt verification enabled", "jwt_sources", len(cfg.Inbound.Auth.JWT))
 	}
+	if cfg.Inbound.Auth.SAMLEnabled() {
+		samlSrc := cfg.Inbound.Auth.SAML
+		logger.Info("saml sp login enabled",
+			"saml_source", samlSrc.Name,
+			"acs_path", samlSrc.ACSPath,
+			"sp_entity_id", samlSrc.SPEntityID)
+		if !strings.HasPrefix(samlSrc.SPBaseURL, "https://") {
+			// Browsers only honor SameSite=None (required for the IdP's
+			// cross-site ACS POST — see buildSAMLProvider's doc comment)
+			// on Secure cookies. Warn, don't reject: every other URL
+			// field in this schema (target, jwks_url, idp_metadata_url)
+			// already permits http, including for legitimate local-dev
+			// and integration-test use, and this proxy's own
+			// integration tests need http://127.0.0.1 to work at all.
+			logger.Warn("saml sp_base_url is not https: real browsers will not send the ACS tracking cookie back cross-site, so login will not work outside local dev/test",
+				"sp_base_url", samlSrc.SPBaseURL)
+		}
+	}
+
+	authRegistry := authn.NewRegistry(logger)
+	samlRegistry := authn.NewSAMLRegistry(logger)
+	// Deferred here (not earlier/later) so both fire after srv.Shutdown
+	// below returns — in-flight requests during graceful shutdown can
+	// still verify against a live resolver/provider.
+	defer authRegistry.Close()
+	defer samlRegistry.Close()
 
 	transport := proxy.BuildTransport(cfg)
 	rp := proxy.New(source, logger, transport)
+	requireAuth := authn.NewMiddleware(source, authRegistry, samlRegistry, logger)
 
 	mux := http.NewServeMux()
-	mux.Handle("/healthz", proxy.HealthzHandler())
-	mux.Handle("/", rp)
+	mux.Handle("/healthz", proxy.HealthzHandler()) // deliberately unauthenticated
+	// requireAuth is installed unconditionally, even with nothing
+	// configured now — a later hot-reload can add a source, and the
+	// fully-disabled path costs two atomic config loads per request.
+	mux.Handle("/", requireAuth(rp))
 
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", cfg.ListenAddr)

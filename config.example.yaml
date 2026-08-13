@@ -7,9 +7,10 @@
 listen_addr: ":8080"
 
 # Backend to forward every request to. Must be an absolute http(s) URL.
-# This is the only field that hot-reloads: edit it (or replace this file
-# atomically, e.g. via `mv`) and the proxy picks up the change without a
-# restart, with no dropped in-flight requests.
+# Hot-reloads: edit it (or replace this file atomically, e.g. via `mv`)
+# and the proxy picks up the change without a restart, with no dropped
+# in-flight requests. (inbound.auth below hot-reloads too — see its own
+# comment; listen_addr/timeouts above are the only fields that don't.)
 target: "http://localhost:9000"
 
 # Optional. All fields have sane defaults if omitted. Like listen_addr,
@@ -22,11 +23,13 @@ timeouts:
   dial: 5s
   response_header: 15s
 
-# Optional. Describes trusted token sources so the proxy can eventually
-# verify incoming credentials — this is schema only for now: nothing
-# here is enforced yet (including: SAML acs_paths below are not
-# actually served). Like target, inbound.auth hot-reloads with no
-# process restart.
+# Optional. Describes trusted credential sources. Both JWT and SAML are
+# enforced: a request matching a configured, non-disabled jwt source's
+# issuer must carry a valid token or the proxy responds 401; with a
+# saml source configured and enabled, an unauthenticated request is
+# redirected to the IdP instead (see the README's Auth section for how
+# the two combine when both are configured). Like target, inbound.auth
+# hot-reloads with no process restart, for both jwt and saml.
 #
 # jwt/saml can also be set (or overridden) via --inbound-auth-jwt-json/
 # TAP_INBOUND_AUTH_JWT_JSON (a JSON array, fully replacing the jwt list)
@@ -38,10 +41,9 @@ timeouts:
 # not a list — see the README's Auth section for why.
 #
 # There is no separate "enabled" key: adding a jwt source below that
-# isn't disabled, or the saml source if present and not disabled, turns
-# verification on immediately once a future pass implements enforcement.
-# To stage a fully-written jwt list (or the saml source) without going
-# live, mark every entry disabled: true.
+# isn't disabled turns JWT verification on immediately. To stage a
+# fully-written jwt list (or the saml source) without going live, mark
+# every entry disabled: true.
 #
 # Commented out entirely so the default `make run` config stays fully
 # functional without a real JWKS or IdP endpoint on hand.
@@ -74,14 +76,48 @@ timeouts:
 #       name: corp-sso
 #       issuer: "https://idp.corp.example.com/metadata" # the IdP's entity ID
 #       idp_metadata_url: "https://idp.corp.example.com/metadata"
+#       # This proxy's own externally-reachable origin — required, no
+#       # default. Must be https:// in any real deployment: the IdP's
+#       # ACS POST is cross-site, so the tracking cookie needs
+#       # SameSite=None, which browsers only honor on Secure (https)
+#       # cookies. http:// is accepted (and warned about at startup)
+#       # for local dev/test only.
+#       sp_base_url: "https://proxy.example.com"
 #       sp_entity_id: "https://proxy.example.com/saml/metadata"
 #       acs_path: "/saml/corp-sso/acs"
 #       session_cookie: "corp_sso_session"
 #       # Names an environment variable holding the session-signing
 #       # key — never the key itself in this file. It must already be
-#       # set for the proxy to start; here it'd need to be, e.g.,
-#       # `export CORP_SSO_SESSION_KEY=...` before running.
+#       # set (to at least 32 bytes) for the proxy to start; here it'd
+#       # need to be, e.g., `export CORP_SSO_SESSION_KEY=...` before
+#       # running.
 #       session_signing_key_env: "CORP_SSO_SESSION_KEY"
 #       session_duration: 8h
+#       idp_metadata_cache_ttl: 1h # optional, defaults shown
+#       #
+#       # Optional, and must be set together (or not at all): a
+#       # persistent RSA keypair this proxy advertises as an encryption
+#       # key in its own SP metadata, so the IdP can send (and this
+#       # proxy will transparently decrypt) EncryptedAssertion elements
+#       # instead of plaintext ones. Needed for Shibboleth-based IdPs
+#       # (which default to encrypting assertions) and IdPs joined to
+#       # the InCommon/eduGAIN research-and-education federations
+#       # (whose membership profile requires SP-side decryption
+#       # support); not needed for commercial SaaS IdPs (Okta, Entra
+#       # ID, ...) in their default configuration. Does NOT enable
+#       # signed AuthnRequests, a separate, still-unsupported feature —
+#       # see the README's SAML section.
+#       #
+#       # sp_key_env names an environment variable holding a
+#       # PEM-encoded RSA private key (PKCS#1 or PKCS#8) — never the
+#       # key itself in this file, same convention as
+#       # session_signing_key_env above. sp_cert is the matching
+#       # PEM-encoded certificate; being public, it's fine directly
+#       # here, unlike the key.
+#       # sp_key_env: "CORP_SSO_SP_KEY"
+#       # sp_cert: |
+#       #   -----BEGIN CERTIFICATE-----
+#       #   MIIC...
+#       #   -----END CERTIFICATE-----
 #
 # outbound: {} # reserved for later: rewriting credentials on the backend leg

@@ -223,6 +223,36 @@ inbound:
 	assert.Equal(t, "from-file", cfg.Inbound.Auth.JWT[0].Name)
 }
 
+// TestLoadLayered_JSONFieldOverride_EmptyStringLeavesFileUntouched is a
+// regression test for a real bug found in review: os.LookupEnv's ok is
+// true for TAP_INBOUND_AUTH_JWT_JSON="" (a real-world artifact of
+// container-env templating that conditionally renders an empty value
+// rather than omitting the var entirely), so treating "set" as "any ok
+// from LookupEnv" — rather than "set to a non-empty value" — made an
+// empty override string flow into json.Unmarshal("") and fail the
+// entire config load with a confusing "invalid JSON: unexpected end of
+// JSON input", even though the operator's intent was clearly "no
+// override".
+func TestLoadLayered_JSONFieldOverride_EmptyStringLeavesFileUntouched(t *testing.T) {
+	path := writeTempFile(t, `
+target: http://from-file:9000
+inbound:
+  auth:
+    jwt:
+      - name: from-file
+        issuer: https://file.example.com
+        jwks_url: https://file.example.com/jwks.json
+`)
+	t.Setenv("TAP_INBOUND_AUTH_JWT_JSON", "")
+
+	fs := newFlagSet(t)
+	cfg, err := loadLayered(path, fs)
+	require.NoError(t, err)
+
+	require.Len(t, cfg.Inbound.Auth.JWT, 1)
+	assert.Equal(t, "from-file", cfg.Inbound.Auth.JWT[0].Name)
+}
+
 // TestLoadLayered_JSONFieldOverride_AtPrefixIsLiteral confirms the
 // override only ever accepts inline JSON: a leading "@" is not treated
 // as a file-path marker, so a value like "@/some/path" must fail as
@@ -260,8 +290,8 @@ func TestLoadLayered_JSONFieldOverride_WrongShapeStillErrors(t *testing.T) {
 
 func TestResolve_SAMLJSONFieldOverride_Object(t *testing.T) {
 	t.Setenv("TAP_TARGET", "http://static:9000")
-	t.Setenv("TAP_SAML_TEST_SESSION_KEY", "secret")
-	t.Setenv("TAP_INBOUND_AUTH_SAML_JSON", `{"name":"saml-a","issuer":"https://idp.example.com/metadata","idp_metadata_url":"https://idp.example.com/metadata","sp_entity_id":"https://proxy.example.com/saml/metadata","acs_path":"/saml/saml-a/acs","session_cookie":"saml_a_session","session_signing_key_env":"TAP_SAML_TEST_SESSION_KEY"}`)
+	t.Setenv("TAP_SAML_TEST_SESSION_KEY", validSAMLSessionKey)
+	t.Setenv("TAP_INBOUND_AUTH_SAML_JSON", `{"name":"saml-a","issuer":"https://idp.example.com/metadata","idp_metadata_url":"https://idp.example.com/metadata","sp_base_url":"https://proxy.example.com","sp_entity_id":"https://proxy.example.com/saml/metadata","acs_path":"/saml/saml-a/acs","session_cookie":"saml_a_session","session_signing_key_env":"TAP_SAML_TEST_SESSION_KEY"}`)
 
 	fs := newFlagSet(t)
 	src, err := Resolve(fs)

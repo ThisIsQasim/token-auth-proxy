@@ -160,6 +160,7 @@ inbound:
       name: saml-a
       issuer: https://idp.example.com/metadata
       idp_metadata_url: https://idp.example.com/metadata
+      sp_base_url: https://proxy.example.com
       sp_entity_id: https://proxy.example.com/saml/metadata
       acs_path: /saml/saml-a/acs
       session_cookie: saml_a_session
@@ -167,7 +168,7 @@ inbound:
       disabled: true
 `)
 
-	proc := testutil.StartProxyWith(t, []string{"INTEGRATION_TEST_SAML_SESSION_KEY=secret"}, "--config", cfgPath)
+	proc := testutil.StartProxyWith(t, []string{"INTEGRATION_TEST_SAML_SESSION_KEY=01234567890123456789012345678901"}, "--config", cfgPath)
 	baseURL := "http://" + proc.Addr
 
 	assertBodyEventually(t, baseURL+"/", "v1", 2*time.Second)
@@ -175,13 +176,17 @@ inbound:
 
 // TestProxyStaticEnvMode_JSONListAuthOverride proves the real binary's
 // full Resolve -> static Config path populates Inbound.Auth.JWT from
-// TAP_INBOUND_AUTH_JWT_JSON alone (no --config at all), and that
-// traffic still proxies normally -- nothing is enforced yet, per the
-// schema-only scope.
+// TAP_INBOUND_AUTH_JWT_JSON alone (no --config at all). The source is
+// disabled so this test stays focused on the JSON-override mechanism
+// itself (schema loads correctly from an env var) rather than
+// duplicating JWT enforcement behavior, which test/integration's
+// jwt_integration_test.go already covers exhaustively with real,
+// enabled sources — with JWT verification implemented, an *enabled*
+// source here would (correctly) reject this unauthenticated request.
 func TestProxyStaticEnvMode_JSONListAuthOverride(t *testing.T) {
 	backend := testutil.NewBackend(t, "static-env-auth")
 
-	jwtJSON := `[{"name":"jwt-a","issuer":"https://issuer.example.com","jwks_url":"https://issuer.example.com/jwks.json"}]`
+	jwtJSON := `[{"name":"jwt-a","issuer":"https://issuer.example.com","jwks_url":"https://issuer.example.com/jwks.json","disabled":true}]`
 	proc := testutil.StartProxyWith(t, []string{
 		"TAP_TARGET=" + backend.URL,
 		"TAP_LISTEN_ADDR=:0",

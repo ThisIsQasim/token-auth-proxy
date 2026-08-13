@@ -113,7 +113,7 @@ func TestApplyDefaults_TimeoutsRetainOverrides(t *testing.T) {
 // lists-of-maps — including one with a nested list-of-structs field —
 // into []JWTSource/[]SAMLSource, not just an assumption.
 func TestLoad_AuthSourcesRoundTrip(t *testing.T) {
-	t.Setenv("TAP_TEST_SAML_SESSION_KEY", "secret")
+	t.Setenv("TAP_TEST_SAML_SESSION_KEY", validSAMLSessionKey)
 
 	yamlConfig := `
 target: http://localhost:9000
@@ -138,6 +138,7 @@ inbound:
       name: corp-sso
       issuer: https://idp.example.com/metadata
       idp_metadata_url: https://idp.example.com/metadata
+      sp_base_url: https://proxy.example.com
       sp_entity_id: https://proxy.example.com/saml/metadata
       acs_path: /saml/corp-sso/acs
       session_cookie: corp_sso_session
@@ -174,11 +175,13 @@ inbound:
 	assert.Equal(t, "corp-sso", saml.Name)
 	assert.Equal(t, "https://idp.example.com/metadata", saml.Issuer)
 	assert.Equal(t, "https://idp.example.com/metadata", saml.IDPMetadataURL)
+	assert.Equal(t, "https://proxy.example.com", saml.SPBaseURL)
 	assert.Equal(t, "https://proxy.example.com/saml/metadata", saml.SPEntityID)
 	assert.Equal(t, "/saml/corp-sso/acs", saml.ACSPath)
 	assert.Equal(t, "corp_sso_session", saml.SessionCookie)
 	assert.Equal(t, "TAP_TEST_SAML_SESSION_KEY", saml.SessionSigningKeyEnv)
 	assert.Equal(t, defaultSessionDuration, saml.SessionDuration, "defaulted")
+	assert.Equal(t, defaultIDPMetadataCacheTTL, saml.IDPMetadataCacheTTL, "defaulted")
 
 	assert.True(t, cfg.Inbound.Auth.Enabled(), "jwks-source and corp-sso are both non-disabled")
 }

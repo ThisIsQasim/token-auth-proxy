@@ -256,3 +256,30 @@ func FetchBody(ctx context.Context, url string) (string, error) {
 	}
 	return body, nil
 }
+
+// FetchWith performs a GET against url with the given headers and
+// returns the full response (status, headers, body) without treating a
+// non-200 status as an error — unlike FetchBody, a 401 is an expected
+// outcome for auth tests, not a failure to report up.
+func FetchWith(ctx context.Context, url string, header http.Header) (status int, respHeader http.Header, body string, err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return 0, nil, "", err
+	}
+	for k, vs := range header {
+		for _, v := range vs {
+			req.Header.Add(k, v)
+		}
+	}
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, nil, "", err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	buf := make([]byte, 4096)
+	n, _ := resp.Body.Read(buf)
+	return resp.StatusCode, resp.Header, strings.TrimSpace(string(buf[:n])), nil
+}

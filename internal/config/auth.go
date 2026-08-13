@@ -1,17 +1,26 @@
 package config
 
 import (
+	"crypto/rsa"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
 // Defaults for fields left zero-valued in a JWTSource or SAMLSource.
 const (
-	defaultJWKSCacheTTL    = 5 * time.Minute  // matches Envoy jwt_authn's cache_duration default
-	defaultClockSkew       = 60 * time.Second // matches Envoy jwt_authn's clock_skew default
-	defaultSessionDuration = 12 * time.Hour   // typical enterprise SSO session length
+	defaultJWKSCacheTTL        = 5 * time.Minute  // matches Envoy jwt_authn's cache_duration default
+	defaultClockSkew           = 60 * time.Second // matches Envoy jwt_authn's clock_skew default
+	defaultSessionDuration     = 12 * time.Hour   // typical enterprise SSO session length
+	defaultIDPMetadataCacheTTL = 1 * time.Hour    // SAML IdP metadata (signing certs) rotates far less often than JWKS
 )
+
+// minSessionSigningKeyLen is the shortest secret accepted for the HS256
+// session cookie signature. Mirrors JWTSource.applyDefaults' fail-closed
+// philosophy: a too-short secret is a config error caught at load time,
+// not a silently weak signature discovered later.
+const minSessionSigningKeyLen = 32
 
 // defaultAlgorithm is used when a JWTSource doesn't list any Algorithms.
 const defaultAlgorithm = "RS256"
@@ -94,21 +103,43 @@ func (a *InboundAuthConfig) applyDefaults() {
 }
 
 // Enabled reports whether the proxy has anything to verify requests
-// against: true iff at least one non-Disabled JWT source exists, or a
-// SAML source is configured and not Disabled. This is the single place
-// that logic lives — the config watcher's reload log and main.go's
-// startup warning both call this rather than re-deriving it, and it's
-// what makes "enabled with nothing that can actually authenticate
-// anyone" a structurally impossible state rather than something
-// Validate has to separately catch: Enabled is defined in terms of
-// "does a working source exist," so it can never report true while
-// none does.
+// against: true iff JWTEnabled or SAMLEnabled. This is the single place
+// that logic lives — the config watcher's reload log calls this rather
+// than re-deriving it, and it's what makes "enabled with nothing that
+// can actually authenticate anyone" a structurally impossible state
+// rather than something Validate has to separately catch: Enabled is
+// defined in terms of "does a working source exist," so it can never
+// report true while none does.
+//
+// Enabled alone is deliberately too broad to gate a single enforcement
+// mode on: it's true for a JWT-only, a SAML-only, or a combined config
+// alike. Code that needs to know which mode(s) are actually active
+// must use JWTEnabled/SAMLEnabled instead — see
+// cmd/token-auth-proxy/main.go and internal/authn.NewMiddleware, which
+// composes both.
 func (a InboundAuthConfig) Enabled() bool {
+	return a.JWTEnabled() || a.SAMLEnabled()
+}
+
+// JWTEnabled reports whether at least one non-Disabled JWT source
+// exists — i.e. whether JWT verification is being enforced. Narrower
+// than Enabled: a configuration with only a SAML source is Enabled but
+// not JWTEnabled.
+func (a InboundAuthConfig) JWTEnabled() bool {
 	for _, j := range a.JWT {
 		if !j.Disabled {
 			return true
 		}
 	}
+	return false
+}
+
+// SAMLEnabled reports whether the SAML source is configured and not
+// Disabled — i.e. whether interactive SAML SP login (ACS route,
+// SP-initiated redirects, session cookies) is being enforced. Narrower
+// than Enabled, symmetric with JWTEnabled: a JWT-only configuration is
+// Enabled but not SAMLEnabled.
+func (a InboundAuthConfig) SAMLEnabled() bool {
 	return a.SAML != nil && !a.SAML.Disabled
 }
 
@@ -158,6 +189,20 @@ func (a *InboundAuthConfig) Validate() error {
 		}
 		if err := markUnique(issuers, "issuer", a.SAML.Issuer); err != nil {
 			return fmt.Errorf("inbound.auth.saml: %w", err)
+		}
+
+		// A JWT source reading its bearer token from the same cookie the
+		// SAML session lives in would make credential extraction pick up
+		// a SAML session token and route it by its (SAML-issued) iss
+		// claim — the two auth legs would silently fight over one
+		// cookie. There's no sensible interpretation, so reject it here
+		// rather than let it surface as a confusing runtime rejection.
+		for i := range a.JWT {
+			for _, c := range a.JWT[i].Credentials {
+				if c.Location == "cookie" && c.Name == a.SAML.SessionCookie {
+					return fmt.Errorf("inbound.auth.jwt[%d]: credentials cookie %q collides with inbound.auth.saml.session_cookie", i, c.Name)
+				}
+			}
 		}
 	}
 
@@ -284,17 +329,36 @@ type SAMLSource struct {
 
 	Audiences            []string      `yaml:"audiences,omitempty"`
 	IDPMetadataURL       string        `yaml:"idp_metadata_url,omitempty"`        // required
+	IDPMetadataCacheTTL  time.Duration `yaml:"idp_metadata_cache_ttl,omitempty"`  // defaults to defaultIDPMetadataCacheTTL
+	SPBaseURL            string        `yaml:"sp_base_url,omitempty"`             // required — this proxy's own externally-reachable origin, e.g. "https://proxy.example.com"
 	SPEntityID           string        `yaml:"sp_entity_id,omitempty"`            // required — this proxy's own identity to the IdP
-	ACSPath              string        `yaml:"acs_path,omitempty"`                // required — where the IdP POSTs the SAMLResponse
+	ACSPath              string        `yaml:"acs_path,omitempty"`                // required — where the IdP POSTs the SAMLResponse, relative to SPBaseURL
 	SessionCookie        string        `yaml:"session_cookie,omitempty"`          // required
 	SessionSigningKeyEnv string        `yaml:"session_signing_key_env,omitempty"` // required — NAME of an env var holding the signing key, never the key itself in YAML
 	SessionDuration      time.Duration `yaml:"session_duration,omitempty"`        // defaults to defaultSessionDuration
+
+	// SPKeyEnv/SPCert are optional and must be set together, or not at
+	// all: an RSA keypair this proxy persists and advertises in its own
+	// (samlsp-generated) SP metadata, enabling the IdP to encrypt
+	// assertions to it. With neither set (the default), this proxy has
+	// no persistent SP identity beyond its entity ID — see the README's
+	// SAML section for exactly which IdP populations that excludes.
+	// SPKeyEnv is the NAME of an env var holding a PEM-encoded RSA
+	// private key (PKCS#1 or PKCS#8), never the key itself in YAML,
+	// same convention as SessionSigningKeyEnv. SPCert is the matching
+	// PEM-encoded X.509 certificate — public by nature, so it's fine
+	// directly in YAML, unlike the key.
+	SPKeyEnv string `yaml:"sp_key_env,omitempty"`
+	SPCert   string `yaml:"sp_cert,omitempty"`
 }
 
 // applyDefaults fills zero-value fields.
 func (s *SAMLSource) applyDefaults() {
 	if s.SessionDuration == 0 {
 		s.SessionDuration = defaultSessionDuration
+	}
+	if s.IDPMetadataCacheTTL == 0 {
+		s.IDPMetadataCacheTTL = defaultIDPMetadataCacheTTL
 	}
 }
 
@@ -313,11 +377,23 @@ func (s *SAMLSource) validate() error {
 	if _, err := parseAbsoluteHTTPURL("idp_metadata_url", s.IDPMetadataURL); err != nil {
 		return err
 	}
+	if s.SPBaseURL == "" {
+		return fmt.Errorf("sp_base_url is required")
+	}
+	if _, err := parseAbsoluteHTTPURL("sp_base_url", s.SPBaseURL); err != nil {
+		return err
+	}
 	if s.SPEntityID == "" {
 		return fmt.Errorf("sp_entity_id is required")
 	}
 	if s.ACSPath == "" {
 		return fmt.Errorf("acs_path is required")
+	}
+	if !strings.HasPrefix(s.ACSPath, "/") {
+		return fmt.Errorf("acs_path must begin with %q", "/")
+	}
+	if s.ACSPath == "/healthz" {
+		return fmt.Errorf("acs_path must not be %q: that path is always served unauthenticated and never reaches inbound.auth", "/healthz")
 	}
 	if s.SessionCookie == "" {
 		return fmt.Errorf("session_cookie is required")
@@ -325,9 +401,40 @@ func (s *SAMLSource) validate() error {
 	if s.SessionSigningKeyEnv == "" {
 		return fmt.Errorf("session_signing_key_env is required")
 	}
-	if _, ok := os.LookupEnv(s.SessionSigningKeyEnv); !ok {
+	v, ok := os.LookupEnv(s.SessionSigningKeyEnv)
+	if !ok {
 		return fmt.Errorf("session_signing_key_env: environment variable %q is not set", s.SessionSigningKeyEnv)
 	}
+	if len(v) < minSessionSigningKeyLen {
+		return fmt.Errorf("session_signing_key_env: environment variable %q must be at least %d bytes, got %d",
+			s.SessionSigningKeyEnv, minSessionSigningKeyLen, len(v))
+	}
+
+	if (s.SPKeyEnv == "") != (s.SPCert == "") {
+		return fmt.Errorf("sp_key_env and sp_cert must be set together, or not at all")
+	}
+	if s.SPKeyEnv != "" {
+		keyPEM, ok := os.LookupEnv(s.SPKeyEnv)
+		if !ok {
+			return fmt.Errorf("sp_key_env: environment variable %q is not set", s.SPKeyEnv)
+		}
+		key, err := ParseSPPrivateKey(keyPEM)
+		if err != nil {
+			return fmt.Errorf("sp_key_env: environment variable %q: %w", s.SPKeyEnv, err)
+		}
+		cert, err := ParseSPCertificate(s.SPCert)
+		if err != nil {
+			return fmt.Errorf("sp_cert: %w", err)
+		}
+		pub, ok := cert.PublicKey.(*rsa.PublicKey)
+		if !ok {
+			return fmt.Errorf("sp_cert: certificate's public key must be RSA to match sp_key_env, got %T", cert.PublicKey)
+		}
+		if !key.PublicKey.Equal(pub) {
+			return fmt.Errorf("sp_cert: certificate's public key does not match sp_key_env's private key")
+		}
+	}
+
 	return nil
 }
 

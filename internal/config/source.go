@@ -172,16 +172,23 @@ func loadOverrides(k *koanf.Koanf, fs *pflag.FlagSet) error {
 
 // jsonOverrideValue returns the raw override string for spec — a flag
 // (if explicitly set) wins over its env var, mirroring every other
-// field's flag > env precedence — or ("", false) if neither is set, in
-// which case the caller must leave whatever the file layer already
-// loaded for that key completely untouched.
+// field's flag > env precedence — or ("", false) if neither is set (or
+// set to an empty string — os.LookupEnv's ok is true for
+// TAP_..._JSON="", a real-world artifact of container-env templating
+// that conditionally renders an empty value rather than omitting the
+// var entirely; treating that as "no override" rather than "override
+// with invalid JSON" is what lets config load succeed instead of
+// failing on every startup/reload with a confusing "invalid JSON:
+// unexpected end of JSON input"), in which case the caller must leave
+// whatever the file layer already loaded for that key completely
+// untouched.
 func jsonOverrideValue(fs *pflag.FlagSet, spec jsonFieldSpec) (string, bool) {
 	if fs != nil {
-		if f := fs.Lookup(spec.flagName); f != nil && f.Changed {
+		if f := fs.Lookup(spec.flagName); f != nil && f.Changed && f.Value.String() != "" {
 			return f.Value.String(), true
 		}
 	}
-	if v, ok := os.LookupEnv(envPrefix + spec.envName); ok {
+	if v, ok := os.LookupEnv(envPrefix + spec.envName); ok && v != "" {
 		return v, true
 	}
 	return "", false
