@@ -98,51 +98,58 @@ jobs:
         run: |
           set -o pipefail
           go test -tags=load -race -timeout=120s -json ./test/load/... | tee test-results.json
-      # The load test is a single pass/fail test (no subtests), so
-      # dorny/test-reporter's Check below only ever says "1 passed" —
-      # correct, but tells you nothing about the numbers that actually
-      # matter for a load test (throughput, latency percentiles,
-      # resource usage), which otherwise only exist inside the
-      # load-test-report.json artifact someone has to download and open
-      # by hand. Render them straight into this job's own Summary tab
-      # instead — jq ships preinstalled on GitHub-hosted runners.
+      # The load test is a single pass/fail test per scenario (no
+      # subtests), so dorny/test-reporter's Check below only ever says
+      # "2 passed" — correct, but tells you nothing about the numbers
+      # that actually matter for a load test (throughput, latency
+      # percentiles, resource usage — and, since baseline and jwt-auth
+      # both run, the overhead auth adds), which otherwise only exist
+      # inside the load-test-report-*.json artifacts someone has to
+      # download and open by hand. Render them straight into this job's
+      # own Summary tab instead, one table per scenario file found — jq
+      # ships preinstalled on GitHub-hosted runners.
       - name: Summarize load test report
         if: always()
         run: |
-          if [ ! -f load-test-report.json ]; then
+          shopt -s nullglob
+          files=(load-test-report-*.json)
+          if [ ${#files[@]} -eq 0 ]; then
             {
               echo "## Load Test Report"
               echo ""
-              echo "_No report found — the test likely failed before an attack run completed._"
+              echo "_No report found — the test likely failed before any attack run completed._"
             } >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          {
-            echo "## Load Test Report"
-            echo ""
-            echo "| Metric | Value |"
-            echo "|---|---|"
-            jq -r '
-              "| Requests | \(.requests) |",
-              "| Success rate | \((.success * 100) | round)% |",
-              "| Throughput | \(.throughput_rps | round) req/s |",
-              "| p50 latency | \(.latency_p50) |",
-              "| p95 latency | \(.latency_p95) |",
-              "| p99 latency | \(.latency_p99) |",
-              "| Max latency | \(.latency_max) |",
-              "| Peak CPU | \(.resources.peak_cpu_percent | round)% |",
-              "| Avg CPU | \(.resources.avg_cpu_percent | round)% |",
-              "| Peak RSS | \((.resources.peak_rss_bytes / 1048576) | round) MB |",
-              "| Avg RSS | \((.resources.avg_rss_bytes / 1048576) | round) MB |"
-            ' load-test-report.json
-            echo ""
-            echo "Status codes: \`$(jq -c '.status_codes' load-test-report.json)\`"
-            errors=$(jq -c '.errors // []' load-test-report.json)
-            if [ "$errors" != "[]" ] && [ "$errors" != "null" ]; then
+          for f in "${files[@]}"; do
+            name=$(jq -r '.name' "$f")
+            {
+              echo "## Load Test Report: $name"
               echo ""
-              echo "**Errors:** \`$errors\`"
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
+              echo "| Metric | Value |"
+              echo "|---|---|"
+              jq -r '
+                "| Requests | \(.requests) |",
+                "| Success rate | \((.success * 100) | round)% |",
+                "| Throughput | \(.throughput_rps | round) req/s |",
+                "| p50 latency | \(.latency_p50) |",
+                "| p95 latency | \(.latency_p95) |",
+                "| p99 latency | \(.latency_p99) |",
+                "| Max latency | \(.latency_max) |",
+                "| Peak CPU | \(.resources.peak_cpu_percent | round)% |",
+                "| Avg CPU | \(.resources.avg_cpu_percent | round)% |",
+                "| Peak RSS | \((.resources.peak_rss_bytes / 1048576) | round) MB |",
+                "| Avg RSS | \((.resources.avg_rss_bytes / 1048576) | round) MB |"
+              ' "$f"
+              echo ""
+              echo "Status codes: \`$(jq -c '.status_codes' "$f")\`"
+              errors=$(jq -c '.errors // []' "$f")
+              if [ "$errors" != "[]" ] && [ "$errors" != "null" ]; then
+                echo ""
+                echo "**Errors:** \`$errors\`"
+              fi
+            } >> "$GITHUB_STEP_SUMMARY"
+          done
       - name: Publish test results
         if: always()
         uses: dorny/test-reporter@v3
@@ -158,7 +165,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: load-test-report
-          path: load-test-report.json
+          path: load-test-report-*.json
           if-no-files-found: warn
           retention-days: 30
 
