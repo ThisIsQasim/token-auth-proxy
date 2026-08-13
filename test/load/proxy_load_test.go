@@ -312,10 +312,10 @@ func runHotReloadLoadTest(t *testing.T, reportName string, auth *authScenario) {
 	require.NotEmpty(t, samples, "[%s] expected at least one resource usage sample during the attack", reportName)
 }
 
-func TestLoad_HotReloadUnderTraffic(t *testing.T) {
+func TestLoad_HotReloadUnderTraffic_Baseline(t *testing.T) {
 	runHotReloadLoadTest(t, "baseline", nil)
 }
 
-func TestLoad_HotReloadUnderTraffic_WithJWTAuth(t *testing.T) {
+func TestLoad_HotReloadUnderTraffic_JWTAuth(t *testing.T) {
 	runHotReloadLoadTest(t, "jwt-auth", newJWTAuthScenario(t))
 }
