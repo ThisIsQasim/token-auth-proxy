@@ -34,4 +34,4 @@ go.work.sum
 # Local build/test output
 /bin/
 /dist/
-load-test-report.json
+load-test-report*.json
