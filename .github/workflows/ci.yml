@@ -27,9 +27,6 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      checks: write # dorny/test-reporter creates a Check Run for this job's results
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -46,33 +43,28 @@ jobs:
           go test -race -covermode=atomic -coverprofile=coverage.out -json ./... | tee test-results.json
       # Raw go test output only ever showed up as text in this job's own
       # log, easy to miss; this renders an actual pass/fail/skip summary
-      # (and inline failure annotations) as a Check on the run/PR.
+      # directly into this job's own Summary tab (use-actions-summary is
+      # the default, kept explicit here as documentation — verified by
+      # reading dorny/test-reporter's dist/index.js: 'false' takes a
+      # different code path that creates a separate Check Run via the
+      # Checks API instead, which needs its own checks:write permission
+      # and — confirmed by actually pushing and checking — does *not*
+      # appear anywhere on this workflow run's own page, only under the
+      # commit's separate Checks list or its own standalone URL; 'true'
+      # is what actually answers "show it on the workflow page").
       # if: always() so a failing test suite (the case that matters most)
-      # still gets a report, not just a green run; continue-on-error so a
-      # problem creating the check (e.g. a future fork-PR run, which gets
-      # a read-only token regardless of what's requested above) degrades
-      # to "no check created" rather than failing the whole job.
-      # use-actions-summary defaults to true, which — verified by reading
-      # dorny/test-reporter's own dist/index.js — takes a completely
-      # different code path that only writes to this job's own Summary
-      # tab and never calls the Checks API at all; false is what actually
-      # calls checks.create/checks.update to produce the separate,
-      # PR-visible Check Run this step's checks:write permission is for.
+      # still gets a report, not just a green run.
       - name: Publish test results
         if: always()
-        continue-on-error: true
         uses: dorny/test-reporter@v3
         with:
           name: Unit Tests
           path: test-results.json
           reporter: golang-json
-          use-actions-summary: 'false'
+          use-actions-summary: 'true'
 
   test-integration:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      checks: write
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -85,19 +77,15 @@ jobs:
           go test -tags=integration -race -timeout=120s -json ./test/integration/... | tee test-results.json
       - name: Publish test results
         if: always()
-        continue-on-error: true
         uses: dorny/test-reporter@v3
         with:
           name: Integration Tests
           path: test-results.json
           reporter: golang-json
-          use-actions-summary: 'false'
+          use-actions-summary: 'true'
 
   load-test:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      checks: write
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -157,13 +145,12 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Publish test results
         if: always()
-        continue-on-error: true
         uses: dorny/test-reporter@v3
         with:
           name: Load Tests
           path: test-results.json
           reporter: golang-json
-          use-actions-summary: 'false'
+          use-actions-summary: 'true'
       # Uploaded even if the load test fails, so a regression's numbers
       # are still inspectable rather than only a pass/fail result.
       - name: Upload load test report

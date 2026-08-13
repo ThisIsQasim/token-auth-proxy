@@ -5,7 +5,13 @@
 // unit test. It attacks the real exec'd binary at a fixed rate while a
 // background goroutine continuously flips the config file between two
 // backends, and records both request latency (via vegeta) and the proxy
-// process's own CPU/memory usage (via gopsutil) for the run.
+// process's own CPU/memory usage (via gopsutil) for the run. JWT
+// verification is enabled throughout — every attack request carries a
+// real bearer token the proxy has to check — so the numbers reflect the
+// actual auth-enforcing request path, not an unauthenticated
+// pass-through nobody would run in production, and Registry.Reconcile/
+// Keyfunc get exercised under the same sustained concurrent-request-
+// plus-concurrent-reload conditions as the target swap itself.
 //
 // Run via `make test-load` or `go test -tags=load ./test/load/...`. Set
 // LOAD_TEST_REPORT_PATH to have the run's metrics written out as JSON —
@@ -16,11 +22,14 @@ package load
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/shirou/gopsutil/v4/process"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -151,15 +160,48 @@ func writeReport(tb testing.TB, r latencyReport) {
 	tb.Logf("wrote load test report to %s", path)
 }
 
+// jwtConfigYAML is testutil.ConfigYAML plus an enabled JWT source
+// trusting idp — the load test deliberately runs with real auth
+// enforcement on, not a bare pass-through: JWT verification (a real
+// signature check per request) is exactly the kind of per-request cost
+// that matters under concurrent load and would otherwise go completely
+// unmeasured, and this also exercises Registry.Reconcile/Keyfunc under
+// the same sustained concurrent-request-plus-concurrent-reload
+// conditions as the proxy's own target-swap, not just the target swap
+// alone.
+func jwtConfigYAML(listenAddr, target string, idp *testutil.TestIDP) string {
+	return fmt.Sprintf(`
+listen_addr: %q
+target: %q
+inbound:
+  auth:
+    jwt:
+      - name: idp
+        issuer: %q
+        jwks_url: %q
+`, listenAddr, target, idp.Issuer, idp.JWKSURL)
+}
+
 func TestLoad_HotReloadUnderTraffic(t *testing.T) {
 	backendA := testutil.NewBackend(t, "A")
 	backendB := testutil.NewBackend(t, "B")
+	idp := testutil.NewTestIDP(t)
 
 	cfgPath := filepath.Join(t.TempDir(), "config.yaml")
-	testutil.WriteAtomic(t, cfgPath, testutil.ConfigYAML(":0", backendA.URL))
+	testutil.WriteAtomic(t, cfgPath, jwtConfigYAML(":0", backendA.URL, idp))
 
 	proc := testutil.StartProxy(t, cfgPath)
 	targetURL := "http://" + proc.Addr + "/"
+
+	// One token, signed once and reused for the whole attack — a real
+	// client holds onto a token until it expires too, rather than
+	// re-signing per request, so this measures the proxy's actual
+	// verification cost (JWKS-cached signature check), not token-minting
+	// cost that wouldn't exist in the real request path anyway.
+	token := idp.Sign(t, jwt.RegisteredClaims{
+		Issuer:    idp.Issuer,
+		ExpiresAt: jwt.NewNumericDate(time.Now().Add(attackDuration + time.Minute)),
+	})
 
 	flipCtx, stopFlipping := context.WithCancel(context.Background())
 	defer stopFlipping()
@@ -174,7 +216,7 @@ func TestLoad_HotReloadUnderTraffic(t *testing.T) {
 				return
 			case <-ticker.C:
 				i++
-				testutil.WriteAtomic(t, cfgPath, testutil.ConfigYAML(":0", urls[i%2]))
+				testutil.WriteAtomic(t, cfgPath, jwtConfigYAML(":0", urls[i%2], idp))
 			}
 		}
 	}()
@@ -182,7 +224,11 @@ func TestLoad_HotReloadUnderTraffic(t *testing.T) {
 	resourceCtx, stopSampling := context.WithCancel(context.Background())
 	resourceCh := sampleResources(resourceCtx, int32(proc.Cmd.Process.Pid)) //nolint:gosec // pid is always positive
 
-	targeter := vegeta.NewStaticTargeter(vegeta.Target{Method: "GET", URL: targetURL})
+	targeter := vegeta.NewStaticTargeter(vegeta.Target{
+		Method: "GET",
+		URL:    targetURL,
+		Header: http.Header{"Authorization": []string{"Bearer " + token}},
+	})
 	attacker := vegeta.NewAttacker()
 	rate := vegeta.Rate{Freq: attackRate, Per: time.Second}
 
