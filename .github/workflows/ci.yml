@@ -52,6 +52,12 @@ jobs:
       # problem creating the check (e.g. a future fork-PR run, which gets
       # a read-only token regardless of what's requested above) degrades
       # to "no check created" rather than failing the whole job.
+      # use-actions-summary defaults to true, which — verified by reading
+      # dorny/test-reporter's own dist/index.js — takes a completely
+      # different code path that only writes to this job's own Summary
+      # tab and never calls the Checks API at all; false is what actually
+      # calls checks.create/checks.update to produce the separate,
+      # PR-visible Check Run this step's checks:write permission is for.
       - name: Publish test results
         if: always()
         continue-on-error: true
@@ -60,6 +66,7 @@ jobs:
           name: Unit Tests
           path: test-results.json
           reporter: golang-json
+          use-actions-summary: 'false'
 
   test-integration:
     runs-on: ubuntu-latest
@@ -84,6 +91,7 @@ jobs:
           name: Integration Tests
           path: test-results.json
           reporter: golang-json
+          use-actions-summary: 'false'
 
   load-test:
     runs-on: ubuntu-latest
@@ -102,6 +110,51 @@ jobs:
         run: |
           set -o pipefail
           go test -tags=load -race -timeout=120s -json ./test/load/... | tee test-results.json
+      # The load test is a single pass/fail test (no subtests), so
+      # dorny/test-reporter's Check below only ever says "1 passed" —
+      # correct, but tells you nothing about the numbers that actually
+      # matter for a load test (throughput, latency percentiles,
+      # resource usage), which otherwise only exist inside the
+      # load-test-report.json artifact someone has to download and open
+      # by hand. Render them straight into this job's own Summary tab
+      # instead — jq ships preinstalled on GitHub-hosted runners.
+      - name: Summarize load test report
+        if: always()
+        run: |
+          if [ ! -f load-test-report.json ]; then
+            {
+              echo "## Load Test Report"
+              echo ""
+              echo "_No report found — the test likely failed before an attack run completed._"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          {
+            echo "## Load Test Report"
+            echo ""
+            echo "| Metric | Value |"
+            echo "|---|---|"
+            jq -r '
+              "| Requests | \(.requests) |",
+              "| Success rate | \((.success * 100) | round)% |",
+              "| Throughput | \(.throughput_rps | round) req/s |",
+              "| p50 latency | \(.latency_p50) |",
+              "| p95 latency | \(.latency_p95) |",
+              "| p99 latency | \(.latency_p99) |",
+              "| Max latency | \(.latency_max) |",
+              "| Peak CPU | \(.resources.peak_cpu_percent | round)% |",
+              "| Avg CPU | \(.resources.avg_cpu_percent | round)% |",
+              "| Peak RSS | \((.resources.peak_rss_bytes / 1048576) | round) MB |",
+              "| Avg RSS | \((.resources.avg_rss_bytes / 1048576) | round) MB |"
+            ' load-test-report.json
+            echo ""
+            echo "Status codes: \`$(jq -c '.status_codes' load-test-report.json)\`"
+            errors=$(jq -c '.errors // []' load-test-report.json)
+            if [ "$errors" != "[]" ] && [ "$errors" != "null" ]; then
+              echo ""
+              echo "**Errors:** \`$errors\`"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Publish test results
         if: always()
         continue-on-error: true
@@ -110,6 +163,7 @@ jobs:
           name: Load Tests
           path: test-results.json
           reporter: golang-json
+          use-actions-summary: 'false'
       # Uploaded even if the load test fails, so a regression's numbers
       # are still inspectable rather than only a pass/fail result.
       - name: Upload load test report
