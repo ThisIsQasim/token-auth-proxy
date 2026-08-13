@@ -27,25 +27,69 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write # dorny/test-reporter creates a Check Run for this job's results
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
-      - run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
+      # -json's machine-readable stream is what test-reporter below
+      # renders into an actual pass/fail summary (see its step comment);
+      # `set -o pipefail` (not GitHub Actions' default for `run:`) makes
+      # this step still fail on a real test failure even though tee is
+      # the last command in the pipeline.
+      - name: Run unit tests
+        run: |
+          set -o pipefail
+          go test -race -covermode=atomic -coverprofile=coverage.out -json ./... | tee test-results.json
+      # Raw go test output only ever showed up as text in this job's own
+      # log, easy to miss; this renders an actual pass/fail/skip summary
+      # (and inline failure annotations) as a Check on the run/PR.
+      # if: always() so a failing test suite (the case that matters most)
+      # still gets a report, not just a green run; continue-on-error so a
+      # problem creating the check (e.g. a future fork-PR run, which gets
+      # a read-only token regardless of what's requested above) degrades
+      # to "no check created" rather than failing the whole job.
+      - name: Publish test results
+        if: always()
+        continue-on-error: true
+        uses: dorny/test-reporter@v3
+        with:
+          name: Unit Tests
+          path: test-results.json
+          reporter: golang-json
 
   test-integration:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version: ${{ env.GO_VERSION }}
       - run: go build -o bin/token-auth-proxy ./cmd/token-auth-proxy
-      - run: go test -tags=integration -race -timeout=120s ./test/integration/...
+      - name: Run integration tests
+        run: |
+          set -o pipefail
+          go test -tags=integration -race -timeout=120s -json ./test/integration/... | tee test-results.json
+      - name: Publish test results
+        if: always()
+        continue-on-error: true
+        uses: dorny/test-reporter@v3
+        with:
+          name: Integration Tests
+          path: test-results.json
+          reporter: golang-json
 
   load-test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -55,7 +99,17 @@ jobs:
       - name: Run load test
         env:
           LOAD_TEST_REPORT_PATH: ${{ github.workspace }}/load-test-report.json
-        run: go test -tags=load -race -timeout=120s ./test/load/...
+        run: |
+          set -o pipefail
+          go test -tags=load -race -timeout=120s -json ./test/load/... | tee test-results.json
+      - name: Publish test results
+        if: always()
+        continue-on-error: true
+        uses: dorny/test-reporter@v3
+        with:
+          name: Load Tests
+          path: test-results.json
+          reporter: golang-json
       # Uploaded even if the load test fails, so a regression's numbers
       # are still inspectable rather than only a pass/fail result.
       - name: Upload load test report
