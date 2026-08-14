@@ -196,10 +196,11 @@ func reject(w http.ResponseWriter, logger *slog.Logger, r *http.Request, why rea
 
 	fields := append([]any{"reason", string(why), "path", r.URL.Path}, extra...)
 	if why == reasonKeysUnavailable {
-		logger.Warn("rejected request", fields...)
+		logger.WarnContext(r.Context(), "rejected request", fields...)
 	} else {
-		logger.Info("rejected request", fields...)
+		logger.InfoContext(r.Context(), "rejected request", fields...)
 	}
+	recordRejection(r.Context(), why)
 }
 
 // truncate returns s, or its first n bytes if s is longer — used to

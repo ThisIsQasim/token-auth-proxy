@@ -235,6 +235,41 @@ default. Any existing SAML source config predating this needs it added
 — previously a SAML source only affected config validation, so this
 couldn't have been silently relied upon before.
 
+## Observability
+
+- **`GET /metrics`** is always mounted, unauthenticated, in Prometheus
+  exposition format — point a Prometheus scrape config at it directly.
+  No flag/env var turns this off; it costs nothing extra to leave on.
+- **Traces and logs**, and *additionally* pushing metrics via OTLP, are
+  off until you configure them — no YAML/`TAP_` fields for this, only
+  the [standard OpenTelemetry environment
+  variables](https://opentelemetry.io/docs/specs/otel/protocol/exporter/)
+  every OTel-instrumented service already reads, e.g.
+  `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME`,
+  `OTEL_RESOURCE_ATTRIBUTES`, and the per-signal
+  `OTEL_EXPORTER_OTLP_{TRACES,METRICS,LOGS}_ENDPOINT` overrides. Setting
+  the general endpoint (or a signal-specific one) turns that signal on;
+  leaving all of them unset keeps the proxy fully inert on that front —
+  no connection attempts, no export-failure log noise.
+- Server-side spans (`otelhttp`) cover the proxied route only — not
+  `/healthz` or `/metrics`, so probe/scrape traffic doesn't spam traces
+  or double-count in its own metrics. Client-side spans cover every
+  outbound call to the backend, and trace context propagates to it
+  automatically.
+- One custom metric: `authn_rejections_total{reason="..."}` — a
+  Prometheus counter (regardless of OTLP config, since `/metrics` is
+  always live) attributed by the same rejection reason already used in
+  structured logs (`no_credential`, `bad_signature`, `expired`,
+  `keys_unavailable`, `saml_metadata_unavailable`, ...). Generic HTTP
+  metrics can't tell you *why* a request got a 401/403/503; this can.
+- Logs stay the same stdout JSON either way (`slog`); when trace export
+  is configured, request-scoped log lines additionally carry
+  `trace_id`/`span_id` and get forwarded to the OTel Logs SDK.
+- This is a meaningfully larger dependency footprint than the rest of
+  this project (the OTel SDK, its OTLP exporters, and
+  `prometheus/client_golang`) — the accepted cost of speaking the real
+  OTLP wire protocol rather than a lighter, non-standard alternative.
+
 ## Running locally
 
 ```sh

@@ -2,6 +2,12 @@
 # var, which take precedence over this file and are re-applied on every
 # reload (not just at startup) — see the README's Configuration section.
 
+# Observability (traces/metrics/logs) is configured entirely via
+# standard OTEL_* environment variables, not this file — there is no
+# telemetry:/otel: section here to look for. /metrics is always mounted
+# and unauthenticated regardless. See the README's Observability
+# section.
+
 # Address the proxy listens on. Read once at startup; changing this
 # requires a process restart to take effect.
 listen_addr: ":8080"

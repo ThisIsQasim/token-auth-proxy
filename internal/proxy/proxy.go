@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/http/httputil"
 
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+
 	"github.com/ThisIsQasim/token-auth-proxy/internal/config"
 )
 
@@ -37,23 +39,30 @@ func New(source ConfigSource, logger *slog.Logger, transport http.RoundTripper) 
 		},
 		Transport: transport,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-			logger.Error("proxy error", "err", err, "path", r.URL.Path)
+			logger.ErrorContext(r.Context(), "proxy error", "err", err, "path", r.URL.Path)
 			w.WriteHeader(http.StatusBadGateway)
 		},
 	}
 }
 
-// BuildTransport constructs the outbound http.Transport used for every
+// BuildTransport constructs the outbound http.RoundTripper used for every
 // proxied request, using dial/response-header timeouts from cfg. This is
 // built once at startup from the initial config — timeouts are not part
 // of the hot-reloadable surface (see config.Config's doc comment).
-func BuildTransport(cfg *config.Config) *http.Transport {
+//
+// Wrapped in otelhttp.NewTransport: client-side spans plus
+// http.client.request.duration for every outbound call to the backend,
+// and — a real, useful side effect, not just an instrumentation nicety —
+// trace-context propagation headers get forwarded to the backend
+// automatically via the propagator telemetry.Setup registers globally.
+func BuildTransport(cfg *config.Config) http.RoundTripper {
 	dialer := &net.Dialer{Timeout: cfg.Timeouts.Dial}
-	return &http.Transport{
+	base := &http.Transport{
 		DialContext:           dialer.DialContext,
 		ResponseHeaderTimeout: cfg.Timeouts.ResponseHeader,
 		ForceAttemptHTTP2:     true,
 	}
+	return otelhttp.NewTransport(base)
 }
 
 // HealthzHandler reports process liveness without touching the backend —

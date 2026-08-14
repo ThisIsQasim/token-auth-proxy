@@ -19,10 +19,12 @@ import (
 	"time"
 
 	"github.com/spf13/pflag"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/ThisIsQasim/token-auth-proxy/internal/authn"
 	"github.com/ThisIsQasim/token-auth-proxy/internal/config"
 	"github.com/ThisIsQasim/token-auth-proxy/internal/proxy"
+	"github.com/ThisIsQasim/token-auth-proxy/internal/telemetry"
 )
 
 const shutdownTimeout = 10 * time.Second
@@ -47,13 +49,39 @@ func run() error {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	providers, err := telemetry.Setup(ctx, logger)
+	if err != nil {
+		return fmt.Errorf("set up telemetry: %w", err)
+	}
+	// Deferred immediately on success, not further down with
+	// authRegistry.Close()/samlRegistry.Close() below — a later
+	// early-return (e.g. config.Resolve or config.NewWatcher failing)
+	// must not skip shutting down whatever Setup already started (e.g.
+	// an OTLP batch processor's background goroutine), even though in
+	// practice main() os.Exit(1)s right after and the process teardown
+	// masks it either way.
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		if err := providers.Shutdown(shutdownCtx); err != nil {
+			logger.Error("telemetry shutdown failed", "err", err)
+		}
+	}()
+	// From here on, every existing logger.Info(...)/logger.Error(...)
+	// call site, unmodified, automatically forwards to the OTel Logs SDK
+	// too, once configured (see telemetry.Setup's doc comment) — the
+	// stdout JSON shape integration tests parse is unaffected either
+	// way.
+	logger = providers.Logger
+	slog.SetDefault(logger)
+
 	src, err := config.Resolve(fs)
 	if err != nil {
 		return fmt.Errorf("resolve config: %w", err)
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	var source proxy.ConfigSource
 	var watcher *config.Watcher
@@ -115,11 +143,15 @@ func run() error {
 	requireAuth := authn.NewMiddleware(source, authRegistry, samlRegistry, logger)
 
 	mux := http.NewServeMux()
-	mux.Handle("/healthz", proxy.HealthzHandler()) // deliberately unauthenticated
+	mux.Handle("/healthz", proxy.HealthzHandler())   // deliberately unauthenticated
+	mux.Handle("/metrics", providers.MetricsHandler) // deliberately unauthenticated, always mounted regardless of OTLP config
 	// requireAuth is installed unconditionally, even with nothing
 	// configured now — a later hot-reload can add a source, and the
 	// fully-disabled path costs two atomic config loads per request.
-	mux.Handle("/", requireAuth(rp))
+	// otelhttp wraps only this route (not /healthz or /metrics), so
+	// health/metrics polling doesn't spam traces or double-count in its
+	// own metrics.
+	mux.Handle("/", otelhttp.NewMiddleware("token-auth-proxy")(requireAuth(rp)))
 
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", cfg.ListenAddr)

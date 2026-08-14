@@ -55,7 +55,7 @@ func samlOnError(logger *slog.Logger) func(w http.ResponseWriter, r *http.Reques
 		if errors.As(err, &ire) {
 			fields = append(fields, "private_err", ire.PrivateErr)
 		}
-		logger.Warn("saml request failed", fields...)
+		logger.WarnContext(r.Context(), "saml request failed", fields...)
 
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusForbidden)
@@ -78,5 +78,6 @@ func rejectUnavailable(w http.ResponseWriter, logger *slog.Logger, r *http.Reque
 	w.WriteHeader(http.StatusServiceUnavailable)
 	_, _ = w.Write([]byte("service unavailable"))
 
-	logger.Warn("rejected request", "reason", string(reasonSAMLMetadataUnavailable), "path", r.URL.Path, "err", err)
+	logger.WarnContext(r.Context(), "rejected request", "reason", string(reasonSAMLMetadataUnavailable), "path", r.URL.Path, "err", err)
+	recordRejection(r.Context(), reasonSAMLMetadataUnavailable)
 }

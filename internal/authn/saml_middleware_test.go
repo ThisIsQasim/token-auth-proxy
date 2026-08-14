@@ -226,6 +226,25 @@ func TestRejectUnavailable(t *testing.T) {
 	assert.Equal(t, "30", rr.Header().Get("Retry-After"))
 }
 
+// TestRejectUnavailable_RecordsRejectionMetric proves rejectUnavailable
+// feeds the same authn_rejections_total counter reject does — the
+// README documents saml_metadata_unavailable as one of the reasons
+// exposed there, so this path must not be a silent gap. Uses the
+// package-shared rejectionCountByReason/testMetricReader (see
+// metrics_test.go's TestMain) rather than standing up its own
+// MeterProvider — the OTel Go API only honors the first
+// otel.SetMeterProvider call in the whole test binary for an
+// already-created instrument like rejectionCounter, so a second,
+// test-local provider here would silently observe nothing.
+func TestRejectUnavailable_RecordsRejectionMetric(t *testing.T) {
+	before := rejectionCountByReason(t, reasonSAMLMetadataUnavailable)
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/protected", nil)
+	rejectUnavailable(httptest.NewRecorder(), testLogger(), req, assert.AnError, 30*time.Second)
+
+	assert.Equal(t, before+1, rejectionCountByReason(t, reasonSAMLMetadataUnavailable))
+}
+
 // TestSAMLFullRoundTrip_EncryptedAssertion_DecryptsAndAuthenticates is
 // the encrypted-assertion counterpart of
 // TestSAMLFullRoundTrip_SetsSessionCookieAndRedirectsToOriginalURI: with
