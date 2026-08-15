@@ -8,6 +8,11 @@ enforce an interactive SAML SP login before forwarding (see [Auth](#auth)
 below) — there's still no per-path routing, every request goes to the
 same `target` regardless of which auth mode (if any) it satisfied.
 
+📖 **New here?** This README is the exhaustive technical reference. For
+an introduction, example use cases, a getting-started walkthrough, and
+task-oriented guides (JWT, SAML, hot-reload, observability), see
+**[the docs](./docs/README.md)**.
+
 ## How it works
 
 - Config comes from up to three layers, in this precedence — **flag >
