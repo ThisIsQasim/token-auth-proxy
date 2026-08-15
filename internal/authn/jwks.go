@@ -182,14 +182,29 @@ func (r *Registry) Reconcile(cfg *config.Config) {
 			r.resolvers[name] = &resolver{name: name, fingerprint: fp}
 		}
 	}
+	// Store while still holding r.mu, atomically with the map mutation
+	// above — not after Unlock. A racing Keyfunc self-heal (which also
+	// mutates the map and seen together under r.mu) must never be able
+	// to land in the window between Unlock and Store here: if it did,
+	// its invalidating seen.Store(nil) would just get clobbered back to
+	// cfg by this line, silently erasing the self-heal's signal that the
+	// map drifted and a real Reconcile is still owed.
+	r.seen.Store(cfg)
 	r.mu.Unlock()
 
 	for _, res := range stale {
 		res.close()
-		r.logger.Info("evicted jwks resolver", "source", res.name, "jwks_url", res.jwksURL)
+		// jwksURL is guarded by res.mu (see the resolver struct comment),
+		// same as kf/cancel/lastErr/nextTry — a Keyfunc call that looked
+		// up this resolver just before Reconcile evicted it can still be
+		// mid-build, writing jwksURL under res.mu, right up until this
+		// point. Reading it here without the lock would race with that
+		// write.
+		res.mu.Lock()
+		jwksURL := res.jwksURL
+		res.mu.Unlock()
+		r.logger.Info("evicted jwks resolver", "source", res.name, "jwks_url", jwksURL)
 	}
-
-	r.seen.Store(cfg)
 }
 
 // Keyfunc returns the jwt.Keyfunc for src, building the underlying
@@ -221,6 +236,17 @@ func (r *Registry) Keyfunc(ctx context.Context, src config.JWTSource) (jwt.Keyfu
 		}
 		res = &resolver{name: src.Name, fingerprint: fp}
 		r.resolvers[src.Name] = res
+
+		// This mutates r.resolvers outside of Reconcile, so it must
+		// invalidate seen: otherwise a racing Reconcile call that already
+		// observed (and pointer-cached) this exact cfg — from before this
+		// self-heal ran — would fast-path past its own diff next time it's
+		// called with that same pointer, permanently missing the eviction
+		// this entry needs (e.g. src.Name was evicted by a concurrent
+		// Reconcile for a newer config, then resurrected here by a caller
+		// still holding the old src). Forcing the next Reconcile to
+		// actually recompute is what lets the registry converge.
+		r.seen.Store(nil)
 	}
 	r.mu.Unlock()
 	if stale != nil {
