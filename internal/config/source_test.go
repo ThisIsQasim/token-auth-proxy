@@ -1,6 +1,8 @@
 package config
 
 import (
+	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -364,4 +366,29 @@ func TestResolve_BasicJSONFieldOverride_NoFile(t *testing.T) {
 	assert.True(t, src.Config.Inbound.Auth.BasicEnabled())
 	assert.Equal(t, defaultBasicRealm, src.Config.Inbound.Auth.Basic.Realm, "defaults still apply to a JSON-provided source")
 	assert.Equal(t, "alice", src.Config.Inbound.Auth.Basic.Users[0].Username)
+}
+
+// ca_cert carries multi-line PEM, which JSON escapes as \n — worth its
+// own case, since it's the only field in a JWT source where the JSON
+// and YAML spellings of the same value look nothing alike.
+func TestResolve_JSONFieldOverride_CACert(t *testing.T) {
+	priv, err := testSPRSAKey()
+	require.NoError(t, err)
+	caPEM := testSPCertPEM(t, priv)
+
+	jsonPEM, err := json.Marshal(caPEM)
+	require.NoError(t, err)
+
+	t.Setenv("TAP_TARGET", "http://static:9000")
+	t.Setenv("TAP_INBOUND_AUTH_JWT_JSON", fmt.Sprintf(
+		`[{"name":"jwt-a","issuer":"https://issuer.example.com","jwks_url":"https://issuer.example.com/jwks.json","ca_cert":%s}]`,
+		jsonPEM))
+
+	fs := newFlagSet(t)
+	src, err := Resolve(fs)
+	require.NoError(t, err)
+	require.NotNil(t, src.Config)
+
+	require.Len(t, src.Config.Inbound.Auth.JWT, 1)
+	assert.Equal(t, caPEM, src.Config.Inbound.Auth.JWT[0].CACert)
 }

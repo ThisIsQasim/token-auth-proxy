@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
 	"sync"
 	"testing"
 	"time"
@@ -27,6 +28,7 @@ type fakeKeyfuncCall struct {
 	ctx     context.Context
 	jwksURL string
 	refresh time.Duration
+	client  *http.Client
 }
 
 // fakeKeyfuncStub is a minimal keyfunc.Keyfunc stand-in — it never
@@ -47,12 +49,13 @@ func (fakeKeyfuncStub) VerificationKeySet(_ context.Context) (jwt.VerificationKe
 
 // newFakeNewKeyfunc returns a newKeyfuncFunc that records every call
 // (including the context it was handed, so a test can assert on
-// ctx.Done() to prove eviction cancels it) and either succeeds or fails
-// according to shouldFail.
+// ctx.Done() to prove eviction cancels it, and the client, so a test
+// can assert which one the registry picked for the source) and either
+// succeeds or fails according to shouldFail.
 func newFakeNewKeyfunc(calls *[]fakeKeyfuncCall, mu *sync.Mutex, shouldFail func(jwksURL string) error) newKeyfuncFunc {
-	return func(ctx context.Context, jwksURL string, refresh time.Duration) (keyfunc.Keyfunc, error) {
+	return func(ctx context.Context, jwksURL string, refresh time.Duration, client *http.Client) (keyfunc.Keyfunc, error) {
 		mu.Lock()
-		*calls = append(*calls, fakeKeyfuncCall{ctx: ctx, jwksURL: jwksURL, refresh: refresh})
+		*calls = append(*calls, fakeKeyfuncCall{ctx: ctx, jwksURL: jwksURL, refresh: refresh, client: client})
 		mu.Unlock()
 		if shouldFail != nil {
 			if err := shouldFail(jwksURL); err != nil {

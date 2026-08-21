@@ -166,6 +166,18 @@ over; see below for how the two combine.
   treated exactly like a directly configured `jwks_url`; the
   document's `issuer` must match the source's configured `issuer`, and
   its advertised signing algorithms are never consulted.
+- **TLS trust for those endpoints**: `ca_cert`, an optional PEM CA
+  bundle used to verify the certificate presented by `jwks_url` /
+  `oidc_discovery_url` (and the `jwks_uri` a discovery document
+  resolves to). It **replaces** the system trust store for this source
+  rather than adding to it, so pinning the wrong bundle fails the fetch
+  instead of quietly falling back to public trust. It covers key
+  material only — the backend and the SAML IdP metadata fetch are
+  unaffected. Write `ca_cert: "${file:/path/to/ca.crt}"`
+  ([value references](#value-references-env--file)) to load it from a
+  mounted file; a rotated CA takes effect on the next reload. Setting it
+  on an `http://` endpoint is a config error, since it would never be
+  used.
 - **Verification**: signature under one of `algorithms` (defaults to
   `["RS256"]` — this list is always authoritative, never the token's own
   `alg` header or anything a JWKS/discovery document claims about

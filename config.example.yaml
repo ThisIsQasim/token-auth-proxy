@@ -76,6 +76,14 @@ timeouts:
 #         issuer: "https://kubernetes.default.svc"
 #         jwks_url: "https://kubernetes.default.svc/openid/v1/jwks"
 #         audiences: ["token-auth-proxy"]
+#         # Optional. PEM CA bundle used to verify the TLS certificate
+#         # of this source's jwks_url/oidc_discovery_url. It replaces
+#         # the system trust store for those endpoints (so pinning the
+#         # wrong bundle fails the fetch rather than falling back to
+#         # public trust), and affects nothing else — not the backend,
+#         # not SAML IdP metadata. Inline PEM works too; a ${file:...}
+#         # reference is just the usual way to point at a mounted one.
+#         ca_cert: "${file:/var/run/secrets/kubernetes.io/serviceaccount/ca.crt}"
 #
 #       - name: partner-oidc
 #         issuer: "https://partner.example.com"

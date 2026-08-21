@@ -145,6 +145,41 @@ like a directly configured `jwks_url`. The discovery document's own
 `issuer` must match your configured `issuer` — its advertised signing
 algorithms are never consulted, only your own `algorithms` list is.
 
+## Pinning a CA for the JWKS endpoint
+
+If your IdP's certificate isn't signed by a public CA — a cluster-
+internal issuer, a corporate PKI — give the source a `ca_cert`:
+
+```yaml
+inbound:
+  auth:
+    jwt:
+      - name: internal-k8s
+        issuer: "https://kubernetes.default.svc"
+        jwks_url: "https://kubernetes.default.svc/openid/v1/jwks"
+        ca_cert: "${file:/var/run/secrets/kubernetes.io/serviceaccount/ca.crt}"
+```
+
+`ca_cert` holds PEM, so `${file:...}` is how you point it at a mounted
+file — an unreadable path fails the config load rather than the first
+token verification. Inline PEM works too:
+
+```yaml
+        ca_cert: |
+          -----BEGIN CERTIFICATE-----
+          MIIC...
+          -----END CERTIFICATE-----
+```
+
+It applies to that source's `jwks_url`/`oidc_discovery_url` only, and
+replaces the system trust store for them — with `ca_cert` set, a
+certificate signed by a public CA is rejected.
+
+Rotating the CA means editing the file (or the inline PEM) and letting
+the config reload; the proxy then rebuilds that source's JWKS resolver
+against the new roots. The file itself isn't watched, so a rotation
+with no config change waits for the next reload or restart.
+
 ## Where the token comes from
 
 By default the proxy looks for `Authorization: Bearer <token>`. Override
@@ -192,6 +227,9 @@ interacts with a `--config` file's own value.
   on algorithm confusion attacks).
 - **Tokens with no `exp` claim are always rejected.** There's no way to
   configure around this.
+- **A JWKS fetch that fails is a `401`, not a `503`.** An unreachable
+  or untrusted `jwks_url` looks identical to a bad token from the
+  client's side; the proxy's logs name the real cause.
 - **The rejection reason never reaches the client** — only a generic
   `401` and `WWW-Authenticate` header. Check the proxy's own logs (or
   `authn_rejections_total{reason="..."}` — see the

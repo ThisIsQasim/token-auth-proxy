@@ -301,9 +301,29 @@ type JWTSource struct {
 	Credentials      []CredentialLocation `yaml:"credentials,omitempty"` // tried in order, first non-empty wins; defaults to [{header, Authorization, "Bearer "}] if omitted
 	JWKSURL          string               `yaml:"jwks_url,omitempty"`    // exactly one of JWKSURL/OIDCDiscoveryURL
 	OIDCDiscoveryURL string               `yaml:"oidc_discovery_url,omitempty"`
-	Algorithms       []string             `yaml:"algorithms,omitempty"`     // defaults to ["RS256"]; every entry must be in allowedAlgorithms; always authoritative regardless of what a fetched key claims about itself (RFC 8725 §3.1)
-	JWKSCacheTTL     time.Duration        `yaml:"jwks_cache_ttl,omitempty"` // defaults to defaultJWKSCacheTTL
-	ClockSkew        time.Duration        `yaml:"clock_skew,omitempty"`     // defaults to defaultClockSkew
+
+	// CACert is an optional PEM-encoded CA bundle used to verify the TLS
+	// certificate of this source's jwks_url/oidc_discovery_url (and, for
+	// a discovery URL, the jwks_uri it resolves to). Empty — the default
+	// — means the system trust store, exactly as before.
+	//
+	// It *replaces* the system trust store for those endpoints rather
+	// than extending it; see ParseCACertPool for why. The scope is
+	// deliberately per-source and confined to key-material fetches: the
+	// backend leg (Config.Target) and the SAML IdP metadata fetch are
+	// separate trust decisions and are unaffected.
+	//
+	// PEM content rather than a path, matching SPCert: a path is written
+	// as "${file:/var/run/secrets/.../ca.crt}" (see interpolate.go),
+	// which turns an unreadable file into a config-load error, and —
+	// because the resolved content lands here, inside the resolver
+	// fingerprint — makes a rotated CA rebuild the resolver on the next
+	// reload. A bare path field would do neither.
+	CACert string `yaml:"ca_cert,omitempty"`
+
+	Algorithms   []string      `yaml:"algorithms,omitempty"`     // defaults to ["RS256"]; every entry must be in allowedAlgorithms; always authoritative regardless of what a fetched key claims about itself (RFC 8725 §3.1)
+	JWKSCacheTTL time.Duration `yaml:"jwks_cache_ttl,omitempty"` // defaults to defaultJWKSCacheTTL
+	ClockSkew    time.Duration `yaml:"clock_skew,omitempty"`     // defaults to defaultClockSkew
 }
 
 // applyDefaults fills zero-value fields. Deliberately never inferred
@@ -353,6 +373,24 @@ func (j *JWTSource) validate() error {
 	if j.OIDCDiscoveryURL != "" {
 		if _, err := parseAbsoluteHTTPURL("oidc_discovery_url", j.OIDCDiscoveryURL); err != nil {
 			return err
+		}
+	}
+
+	if j.CACert != "" {
+		if _, err := ParseCACertPool(j.CACert); err != nil {
+			return fmt.Errorf("ca_cert: %w", err)
+		}
+		// A CA bundle attached to an http:// endpoint is inert: no
+		// handshake ever happens, so the trust requirement the operator
+		// wrote down is silently not enforced. The checks above leave
+		// exactly one of the two URLs set, so naming the offending field
+		// is unambiguous.
+		endpoint, field := j.JWKSURL, "jwks_url"
+		if endpoint == "" {
+			endpoint, field = j.OIDCDiscoveryURL, "oidc_discovery_url"
+		}
+		if strings.HasPrefix(strings.ToLower(endpoint), "http://") {
+			return fmt.Errorf("ca_cert is set but %s is http://, so it would never be used; use https:// or remove ca_cert", field)
 		}
 	}
 

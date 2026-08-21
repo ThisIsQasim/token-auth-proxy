@@ -89,6 +89,10 @@ func testSPKeyCertPEM(t *testing.T) (keyPEM, certPEM string) {
 }
 
 func TestJWTSource_Validate(t *testing.T) {
+	caPriv, err := testSPRSAKey()
+	require.NoError(t, err)
+	caPEM := testSPCertPEM(t, caPriv)
+
 	tests := []struct {
 		name      string
 		mutate    func(*JWTSource)
@@ -142,6 +146,57 @@ func TestJWTSource_Validate(t *testing.T) {
 			mutate:    func(j *JWTSource) { j.JWKSURL = "ftp://issuer.example.com/jwks.json" },
 			wantErr:   true,
 			errSubstr: "scheme must be http or https",
+		},
+		{
+			name:   "valid ca_cert on an https jwks_url",
+			mutate: func(j *JWTSource) { j.CACert = caPEM },
+		},
+		{
+			name: "valid ca_cert on an https oidc_discovery_url",
+			mutate: func(j *JWTSource) {
+				j.JWKSURL = ""
+				j.OIDCDiscoveryURL = "https://issuer.example.com/.well-known/openid-configuration"
+				j.CACert = caPEM
+			},
+		},
+		{
+			name:      "ca_cert that isn't a certificate",
+			mutate:    func(j *JWTSource) { j.CACert = "-----BEGIN CERTIFICATE-----\nnope\n-----END CERTIFICATE-----\n" },
+			wantErr:   true,
+			errSubstr: "ca_cert",
+		},
+		{
+			name:      "ca_cert with no PEM block",
+			mutate:    func(j *JWTSource) { j.CACert = "/etc/ssl/certs/ca.pem" },
+			wantErr:   true,
+			errSubstr: "no PEM-encoded certificate found",
+		},
+		{
+			// A CA bundle on a plaintext endpoint is never consulted, so
+			// the stated trust requirement would be silently unenforced.
+			name: "ca_cert on an http jwks_url",
+			mutate: func(j *JWTSource) {
+				j.JWKSURL = "http://issuer.example.com/jwks.json"
+				j.CACert = caPEM
+			},
+			wantErr:   true,
+			errSubstr: "ca_cert is set but jwks_url is http://",
+		},
+		{
+			name: "ca_cert on an http oidc_discovery_url",
+			mutate: func(j *JWTSource) {
+				j.JWKSURL = ""
+				j.OIDCDiscoveryURL = "http://issuer.example.com/.well-known/openid-configuration"
+				j.CACert = caPEM
+			},
+			wantErr:   true,
+			errSubstr: "ca_cert is set but oidc_discovery_url is http://",
+		},
+		{
+			// Without ca_cert, http stays permitted exactly as before —
+			// integration tests and local dev depend on it.
+			name:   "http jwks_url with no ca_cert is still allowed",
+			mutate: func(j *JWTSource) { j.JWKSURL = "http://issuer.example.com/jwks.json" },
 		},
 		{
 			name:      "algorithms: none",

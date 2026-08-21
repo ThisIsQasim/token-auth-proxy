@@ -2,6 +2,7 @@ package authn
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -29,10 +30,16 @@ const defaultResolverRetry = 30 * time.Second
 const jwksHTTPTimeout = 10 * time.Second
 
 // newKeyfuncFunc builds a jwt.Keyfunc-producing resolver for jwksURL,
-// refreshing on the given interval. A seam: production wires
-// defaultNewKeyfunc; tests inject a deterministic fake so jwks_test.go
-// can exercise Registry's lifecycle without any real network.
-type newKeyfuncFunc func(ctx context.Context, jwksURL string, refresh time.Duration) (keyfunc.Keyfunc, error)
+// refreshing on the given interval and fetching with client. A seam:
+// production wires defaultNewKeyfunc; tests inject a deterministic fake
+// so jwks_test.go can exercise Registry's lifecycle without any real
+// network.
+//
+// client is a parameter rather than something the implementation
+// captures because it varies per source: a source pinning a ca_cert
+// gets its own client, everything else shares the registry's default
+// one. See Registry.Keyfunc.
+type newKeyfuncFunc func(ctx context.Context, jwksURL string, refresh time.Duration, client *http.Client) (keyfunc.Keyfunc, error)
 
 // Registry owns one JWKS resolver per configured, non-Disabled JWT
 // source, and the background refresh goroutine each resolver runs. It
@@ -57,6 +64,8 @@ type Registry struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	logger *slog.Logger
+	// client is the shared default, used by every source that doesn't
+	// pin its own ca_cert. Sources that do get their own — see Keyfunc.
 	client *http.Client
 	retry  time.Duration
 	now    func() time.Time
@@ -83,6 +92,13 @@ type resolver struct {
 	jwksURL string
 	lastErr error
 	nextTry time.Time
+
+	// client is whichever HTTP client this resolver was built with, and
+	// ownClient records whether it belongs to this resolver alone (true
+	// only when the source pins a ca_cert) or is the registry's shared
+	// default. Only an owned client may be torn down on eviction.
+	client    *http.Client
+	ownClient bool
 }
 
 func (r *resolver) close() {
@@ -90,6 +106,13 @@ func (r *resolver) close() {
 	defer r.mu.Unlock()
 	if r.cancel != nil {
 		r.cancel()
+	}
+	if r.ownClient && r.client != nil {
+		// This resolver built its own client — and so its own connection
+		// pool — for a pinned CA. Nothing else can reuse those
+		// connections once the resolver is gone, so drop them now
+		// instead of waiting out the transport's IdleConnTimeout.
+		r.client.CloseIdleConnections()
 	}
 }
 
@@ -100,16 +123,16 @@ func NewRegistry(logger *slog.Logger) *Registry {
 		logger = slog.Default()
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	client := &http.Client{Timeout: jwksHTTPTimeout}
+	defaultClient := &http.Client{Timeout: jwksHTTPTimeout}
 
 	return &Registry{
 		ctx:    ctx,
 		cancel: cancel,
 		logger: logger,
-		client: client,
+		client: defaultClient,
 		retry:  defaultResolverRetry,
 		now:    time.Now,
-		newKeyfunc: func(ctx context.Context, jwksURL string, refresh time.Duration) (keyfunc.Keyfunc, error) {
+		newKeyfunc: func(ctx context.Context, jwksURL string, refresh time.Duration, client *http.Client) (keyfunc.Keyfunc, error) {
 			return keyfunc.NewDefaultOverrideCtx(ctx, []string{jwksURL}, keyfunc.Override{
 				Client:          client,
 				HTTPTimeout:     jwksHTTPTimeout,
@@ -133,8 +156,39 @@ func (r *Registry) Close() {
 // fingerprint identifies everything about a JWTSource a resolver is
 // built from — a change to any of these (and only these) means the old
 // resolver must be rebuilt, not reused.
+//
+// CACert is included as full PEM content, not as a digest: it's what
+// the resolver's TLS trust roots were built from, so rotating the CA
+// (typically by editing the file behind a "${file:...}" reference and
+// touching the config) has to evict the resolver, or the old roots
+// would stay live until some unrelated field changed. PEM is base64
+// and can't contain the NUL separator.
 func fingerprint(j config.JWTSource) string {
-	return j.JWKSURL + "\x00" + j.OIDCDiscoveryURL + "\x00" + j.JWKSCacheTTL.String()
+	return j.JWKSURL + "\x00" + j.OIDCDiscoveryURL + "\x00" + j.JWKSCacheTTL.String() + "\x00" + j.CACert
+}
+
+// newCACertClient builds an HTTP client that verifies TLS against
+// exactly the CAs in caCertPEM; the system trust store is not consulted
+// (see config.ParseCACertPool for why it replaces rather than extends).
+//
+// Cloned from http.DefaultTransport rather than assembled from scratch
+// so that proxy support (HTTP_PROXY/HTTPS_PROXY/NO_PROXY), connection
+// pooling limits and HTTP/2 negotiation stay identical to every other
+// client here — the trust roots are the only intended difference.
+func newCACertClient(caCertPEM string) (*http.Client, error) {
+	pool, err := config.ParseCACertPool(caCertPEM)
+	if err != nil {
+		return nil, err
+	}
+
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return nil, fmt.Errorf("http.DefaultTransport is %T, not *http.Transport", http.DefaultTransport)
+	}
+	transport := base.Clone()
+	transport.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
+
+	return &http.Client{Timeout: jwksHTTPTimeout, Transport: transport}, nil
 }
 
 // Reconcile brings the resolver set in line with cfg. In the steady
@@ -263,6 +317,39 @@ func (r *Registry) Keyfunc(ctx context.Context, src config.JWTSource) (jwt.Keyfu
 		return nil, res.lastErr
 	}
 
+	// The client is chosen per source, not per registry: a source
+	// pinning a ca_cert needs its own TLS trust roots, and therefore its
+	// own transport and connection pool. Chosen here, on the build path,
+	// so it costs nothing on the cached-resolver fast path above, and is
+	// stored on res so close() can tear it down on eviction.
+	client, ownClient := r.client, false
+	if src.CACert != "" {
+		c, err := newCACertClient(src.CACert)
+		if err != nil {
+			// config.Validate already parsed this exact PEM at load
+			// time, so this is only reachable for a source that never
+			// went through it. Negative-cached like any other build
+			// failure rather than retried per request.
+			res.lastErr = fmt.Errorf("build ca_cert trust roots: %w", err)
+			res.nextTry = r.now().Add(r.retry)
+			return nil, res.lastErr
+		}
+		client, ownClient = c, true
+	}
+	// An owned client is only worth keeping if the build below actually
+	// succeeds. On every failure path it's dropped unreferenced, so its
+	// idle connections would otherwise linger until IdleConnTimeout with
+	// nothing able to reuse them — and the negative-cache retry builds a
+	// fresh client each time it fires.
+	built := false
+	if ownClient {
+		defer func() {
+			if !built {
+				client.CloseIdleConnections()
+			}
+		}()
+	}
+
 	jwksURL := src.JWKSURL
 	if jwksURL == "" {
 		// Bounded by the registry's own context + jwksHTTPTimeout, not
@@ -274,7 +361,7 @@ func (r *Registry) Keyfunc(ctx context.Context, src config.JWTSource) (jwt.Keyfu
 		// concurrent caller of the same source. Mirrors
 		// SAMLRegistry.fetchAndBuild's identical rationale.
 		discoveryCtx, cancel := context.WithTimeout(r.ctx, jwksHTTPTimeout)
-		u, err := fetchJWKSURI(discoveryCtx, r.client, src.OIDCDiscoveryURL, src.Issuer)
+		u, err := fetchJWKSURI(discoveryCtx, client, src.OIDCDiscoveryURL, src.Issuer)
 		cancel()
 		if err != nil {
 			res.lastErr = fmt.Errorf("resolve oidc discovery: %w", err)
@@ -285,7 +372,7 @@ func (r *Registry) Keyfunc(ctx context.Context, src config.JWTSource) (jwt.Keyfu
 	}
 
 	resolverCtx, cancel := context.WithCancel(r.ctx)
-	kf, err := r.newKeyfunc(resolverCtx, jwksURL, src.JWKSCacheTTL)
+	kf, err := r.newKeyfunc(resolverCtx, jwksURL, src.JWKSCacheTTL, client)
 	if err != nil {
 		cancel()
 		res.lastErr = fmt.Errorf("build jwks resolver: %w", err)
@@ -296,8 +383,11 @@ func (r *Registry) Keyfunc(ctx context.Context, src config.JWTSource) (jwt.Keyfu
 	res.kf = kf
 	res.cancel = cancel
 	res.jwksURL = jwksURL
+	res.client = client
+	res.ownClient = ownClient
 	res.lastErr = nil
-	r.logger.Info("built jwks resolver", "source", src.Name, "jwks_url", jwksURL)
+	built = true
+	r.logger.Info("built jwks resolver", "source", src.Name, "jwks_url", jwksURL, "pinned_ca", ownClient)
 
 	return res.kf.KeyfuncCtx(ctx), nil
 }

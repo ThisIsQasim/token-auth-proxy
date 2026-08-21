@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -89,6 +90,7 @@ type idpOptions struct {
 	es256  bool
 	issuer string
 	kid    string
+	tls    bool
 }
 
 // IDPOption customizes a TestIDP at construction.
@@ -103,6 +105,13 @@ func WithIssuer(iss string) IDPOption { return func(o *idpOptions) { o.issuer = 
 
 // WithKID sets the initial key ID instead of the default.
 func WithKID(kid string) IDPOption { return func(o *idpOptions) { o.kid = kid } }
+
+// WithTLS serves the JWKS and discovery endpoints over https, using
+// httptest's own self-signed certificate — which no system trust store
+// contains, so a client reaching it must be told to trust it. That's
+// what makes it the fixture for a JWT source's ca_cert: see
+// CACertPEM.
+func WithTLS() IDPOption { return func(o *idpOptions) { o.tls = true } }
 
 // TestIDP is a stand-in identity provider: an httptest server serving a
 // JWKS document (and an OIDC discovery document pointing at it) for a
@@ -148,7 +157,11 @@ func NewTestIDP(tb testing.TB, opts ...IDPOption) *TestIDP {
 	// reading them — nothing can reach the handlers until Start runs.
 	idp.Server = httptest.NewUnstartedServer(mux)
 	tb.Cleanup(idp.Server.Close)
-	idp.Server.Start()
+	if o.tls {
+		idp.Server.StartTLS()
+	} else {
+		idp.Server.Start()
+	}
 
 	idp.JWKSURL = idp.Server.URL + "/jwks.json"
 	idp.DiscoveryURL = idp.Server.URL + "/.well-known/openid-configuration"
@@ -248,6 +261,27 @@ func (i *TestIDP) Rotate(tb testing.TB) {
 	i.mu.Unlock()
 
 	i.setKeypair(tb, newIDPKeypair(tb, kid, es256, true))
+}
+
+// CACertPEM returns the PEM-encoded certificate this IDP serves TLS
+// with, ready to drop into a JWT source's ca_cert. httptest's
+// certificate is self-signed, so it is its own root — pinning it is
+// both what makes the fetch succeed and proof that it succeeded for the
+// configured reason rather than by falling back to public trust.
+//
+// Only meaningful for an IDP started WithTLS; a plaintext one has no
+// certificate and this fails the test rather than returning something
+// unusable.
+func (i *TestIDP) CACertPEM(tb testing.TB) string {
+	tb.Helper()
+	cert := i.Server.Certificate()
+	if cert == nil {
+		tb.Fatal("CACertPEM: this TestIDP was not started WithTLS, so it has no certificate")
+		// Unreachable — tb.Fatal ends the goroutine — but staticcheck
+		// can't see that, and without it flags the deref below.
+		return ""
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw}))
 }
 
 // JWKSHits reports how many times the JWKS endpoint has been requested
