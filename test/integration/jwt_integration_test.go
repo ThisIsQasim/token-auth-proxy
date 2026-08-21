@@ -18,10 +18,10 @@ import (
 )
 
 // assertStatusEventually polls url until it returns wantStatus or the
-// timeout elapses, tolerating transient connection errors — used the
-// same way assertBodyEventually is, but for cases (like a reload
-// flipping enforcement on/off) where the interesting signal is the
-// status code, not the body.
+// timeout elapses, tolerating transient connection errors — used to
+// wait out a reload flipping enforcement on/off. It deliberately only
+// waits: it says nothing about where the response came from, so a
+// caller follows it with assertProxied/assertRejected to assert that.
 func assertStatusEventually(t *testing.T, url string, wantStatus int, timeout time.Duration) {
 	t.Helper()
 	ctx := context.Background()
@@ -89,9 +89,7 @@ inbound:
 	proc := testutil.StartProxy(t, cfgPath)
 	baseURL := "http://" + proc.Addr
 
-	status, header, _, err := testutil.FetchWith(context.Background(), baseURL+"/", nil)
-	require.NoError(t, err)
-	assert.Equal(t, http.StatusUnauthorized, status)
+	header := assertRejected(t, baseURL+"/", nil)
 	assert.Equal(t, "Bearer", header.Get("WWW-Authenticate"))
 }
 
@@ -115,24 +113,18 @@ inbound:
 		other := testutil.NewTestIDP(t, testutil.WithIssuer(idp.Issuer))
 		other.Rotate(t) // force distinct key material from idp's
 		token := other.Sign(t, jwt.RegisteredClaims{Issuer: idp.Issuer, ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour))})
-		status, _, _, err := testutil.FetchWith(context.Background(), baseURL+"/", bearerHeader(token))
-		require.NoError(t, err)
-		assert.Equal(t, http.StatusUnauthorized, status)
+		assertRejected(t, baseURL+"/", bearerHeader(token))
 	})
 
 	t.Run("expired", func(t *testing.T) {
 		token := idp.Sign(t, jwt.RegisteredClaims{Issuer: idp.Issuer, ExpiresAt: jwt.NewNumericDate(time.Now().Add(-time.Hour))})
-		status, _, _, err := testutil.FetchWith(context.Background(), baseURL+"/", bearerHeader(token))
-		require.NoError(t, err)
-		assert.Equal(t, http.StatusUnauthorized, status)
+		assertRejected(t, baseURL+"/", bearerHeader(token))
 	})
 
 	t.Run("unknown issuer", func(t *testing.T) {
 		other := testutil.NewTestIDP(t, testutil.WithIssuer("https://unconfigured-issuer.example.com"))
 		token := other.Sign(t, jwt.RegisteredClaims{Issuer: other.Issuer, ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour))})
-		status, _, _, err := testutil.FetchWith(context.Background(), baseURL+"/", bearerHeader(token))
-		require.NoError(t, err)
-		assert.Equal(t, http.StatusUnauthorized, status)
+		assertRejected(t, baseURL+"/", bearerHeader(token))
 	})
 }
 
@@ -161,9 +153,7 @@ inbound:
 			Issuer: idp.Issuer, Audience: jwt.ClaimStrings{"other"},
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
 		})
-		status, _, _, err := testutil.FetchWith(context.Background(), baseURL+"/", bearerHeader(token))
-		require.NoError(t, err)
-		assert.Equal(t, http.StatusUnauthorized, status)
+		assertRejected(t, baseURL+"/", bearerHeader(token))
 	})
 
 	t.Run("matching audience accepted", func(t *testing.T) {
@@ -171,9 +161,7 @@ inbound:
 			Issuer: idp.Issuer, Audience: jwt.ClaimStrings{"tap"},
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
 		})
-		status, _, _, err := testutil.FetchWith(context.Background(), baseURL+"/", bearerHeader(token))
-		require.NoError(t, err)
-		assert.Equal(t, http.StatusOK, status)
+		assertProxied(t, baseURL+"/", bearerHeader(token))
 	})
 }
 
@@ -299,9 +287,8 @@ inbound:
 		time.Sleep(20 * time.Millisecond)
 	}
 
-	status, _, _, err = testutil.FetchWith(context.Background(), baseURL+"/", bearerHeader(tokenB))
-	require.NoError(t, err)
-	assert.Equal(t, http.StatusOK, status, "token B must work once B is trusted")
+	// Token B works once B is trusted.
+	assertProxied(t, baseURL+"/", bearerHeader(tokenB))
 
 	// Reload back to A and confirm it recovers — eviction isn't one-way.
 	testutil.WriteAtomic(t, cfgPath, configTrusting(idpA))
@@ -340,6 +327,7 @@ inbound:
     jwt:
 %s`, backend.URL, jwtSourceYAML(idp)))
 	assertStatusEventually(t, baseURL+"/", http.StatusUnauthorized, 3*time.Second)
+	assertRejected(t, baseURL+"/", nil)
 
 	testutil.WriteAtomic(t, cfgPath, fmt.Sprintf(`
 listen_addr: ":0"
@@ -352,7 +340,7 @@ inbound:
         jwks_url: %q
         disabled: true
 `, backend.URL, idp.Issuer, idp.JWKSURL))
-	assertStatusEventually(t, baseURL+"/", http.StatusOK, 3*time.Second)
+	assertBodyEventually(t, baseURL+"/", backendBody, 3*time.Second)
 }
 
 func TestProxyJWT_MalformedConfigDuringEnforcementDoesNotDropEnforcement(t *testing.T) {
@@ -379,13 +367,10 @@ inbound:
 	testutil.WriteAtomic(t, cfgPath, "target: [not valid yaml\n")
 	time.Sleep(400 * time.Millisecond)
 
-	statusValid, _, _, err := testutil.FetchWith(context.Background(), baseURL+"/", bearerHeader(token))
-	require.NoError(t, err)
-	assert.Equal(t, http.StatusOK, statusValid, "a valid token must still work after a malformed reload")
-
-	statusMissing, _, _, err := testutil.FetchWith(context.Background(), baseURL+"/", nil)
-	require.NoError(t, err)
-	assert.Equal(t, http.StatusUnauthorized, statusMissing, "a missing token must still be rejected after a malformed reload")
+	// A valid token must still work after a malformed reload, and a
+	// missing one must still be rejected.
+	assertProxied(t, baseURL+"/", bearerHeader(token))
+	assertRejected(t, baseURL+"/", nil)
 }
 
 // TestProxyJWT_EnabledViaEnvJSONOverride is a regression test for a

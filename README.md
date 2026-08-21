@@ -90,48 +90,38 @@ inbound:
           password_hash: "${file:/run/secrets/alice.bcrypt}"
 ```
 
-- **`${env:NAME}`** — the environment variable `NAME`. Unset is an
-  error (the load fails rather than silently substituting an empty
-  value); set-but-empty resolves to `""`.
-- **`${file:/path}`** — the file's contents with exactly one trailing
-  newline stripped, so `echo secret > f` and `printf secret > f` behave
+- **`${env:NAME}`** — the environment variable `NAME`. An unset
+  variable is an error: the load fails rather than silently
+  substituting an empty value. A variable that's set but empty resolves
+  to `""`.
+- **`${file:/path}`** — the file's contents, with exactly one trailing
+  newline stripped so `echo secret > f` and `printf secret > f` behave
   the same. A relative path resolves against **the config file's own
   directory**, not the process's working directory. Files over 1 MiB
   are rejected.
-- Both can appear mid-string and more than once:
+- Both forms can appear mid-string and more than once:
   `"https://${env:IDP_HOST}/metadata"`.
 - **`$` is only special immediately before `{`.** Everything else —
   including a bcrypt hash like `$2y$12$...`, the one value in this
   schema guaranteed to contain `$` — passes through byte-for-byte with
-  no escaping. Write `$${` for a literal `${`.
-- `${...}` that isn't a reference (`${HOME}`, `${C:\path}`) is left
+  no escaping. Write `$${` if you need a literal `${`.
+- A `${...}` that isn't a reference (`${HOME}`, `${C:\path}`) is left
   exactly as written. A reference naming a type that doesn't exist
-  (`${vault:x}`) is an error, not a passthrough — it's a typo in
-  something clearly meant as a reference.
-- Values are resolved **once**, never rescanned: an environment
-  variable whose value happens to contain `${file:/etc/shadow}` stays
-  that literal text.
-- Errors name the config key that failed
-  (`inbound.auth.basic.users[0].password_hash: ${env:X}: environment
-  variable is not set`), and a failure during a *reload* keeps the
-  previously loaded config live, exactly like a malformed file does.
+  (`${vault:x}`) is an error rather than a passthrough, since that's a
+  typo in something clearly meant as a reference.
+- Errors name the config key that failed, and a failure during a
+  *reload* keeps the previously loaded config live, exactly like a
+  malformed file does.
+- **Only the config file is interpolated.** Flags, `TAP_` environment
+  variables and the `TAP_*_JSON` blobs are taken literally — they're
+  already coming from the environment.
+- **Referenced files aren't watched.** The watcher watches the config
+  file's directory only, so rotating a `${file:...}` secret takes
+  effect on the next config reload or restart.
 
-Two boundaries worth knowing:
-
-- **Only the file layer is interpolated.** Flags, `TAP_` env vars and
-  the `TAP_*_JSON` blobs are taken literally (they're already coming
-  from the environment), and `--config`/`TAP_CONFIG` selects the file
-  itself, so it can't contain a reference. A consequence: an
-  unresolvable reference in the file fails the load even when a
-  `TAP_*_JSON` override would have replaced that whole section anyway.
-- **Referenced files aren't watched.** The config watcher watches the
-  config file's directory only, so rotating a `${file:...}` secret
-  takes effect on the next config reload or restart, not the moment the
-  file changes.
-
-The existing `session_signing_key_env` / `sp_key_env` fields (which
-name an environment *variable*) are unchanged and keep working; they
-predate this and remain the documented way to supply those two secrets.
+The existing `session_signing_key_env` / `sp_key_env` fields, which
+name an environment *variable* rather than holding a value, are
+unchanged and keep working.
 
 ## Auth
 
@@ -229,46 +219,36 @@ inbound:
           password_hash: "${file:/run/secrets/bob.bcrypt}"
 ```
 
-- **No `name` field**, unlike the JWT and SAML sources: there's only
-  ever one basic source, so there's nothing to disambiguate — it's
-  `source=basic` in logs.
 - **bcrypt only.** `password_hash` must be a bcrypt hash; a plaintext
   password is rejected at config-load time, naming the user, rather
   than silently rejecting every login afterwards. Generate one with
-  `htpasswd -bnBC 12 "" 'password' | tr -d ':\n'`. The hash is a
-  verifier, not a credential — it can't be replayed against the proxy —
-  so it's fine directly in the config file; `${file:...}`/`${env:...}`
-  ([above](#value-references-env--file)) work here too if you'd rather
-  it came from your secret management.
+  `htpasswd -bnBC 12 "" 'password' | tr -d ':\n'`. A hash is a
+  verifier, not a credential, so it's fine directly in the config file;
+  `${file:...}`/`${env:...}` ([above](#value-references-env--file))
+  work here too.
 - **`realm`** is what a browser shows in its login dialog and what
   clients scope a saved password to. Quotes, backslashes and control
   characters are rejected at load time.
 - **On rejection**: `401` with
   `WWW-Authenticate: Basic realm="...", charset="UTF-8"` and a minimal
-  plaintext body. An unknown username and a wrong password are
-  answered identically, log the same `bad_credential` reason, and take
-  the same time to answer (an unknown user is still compared against a
-  configured hash) — `/metrics` is unauthenticated, so a distinction
-  anywhere would be a public username-enumeration oracle.
-- **Verified credentials are cached** for 5 minutes, keyed by a
-  per-process HMAC of the presented credential. bcrypt is deliberately
-  slow (tens to hundreds of milliseconds per comparison, by design),
-  and a Basic credential is re-presented on *every* request — one page
-  load with twenty subresources would otherwise pay that cost twenty
-  times. The cache is **not** a revocation window: any change to the
-  basic source drops it entirely on the next request, so removing a
-  user takes effect immediately.
-- **Concurrent comparisons are bounded** (half the CPUs, minimum one).
-  Past a 5-second wait a request gets `503` with `Retry-After`, not a
-  `401` — that's capacity, not a bad credential, and it logs as
-  `basic_saturated`. Without this bound, wrong passwords would be a
-  cheap way for an unauthenticated client to exhaust the CPU the
-  proxying path needs.
+  plaintext body. An unknown username and a wrong password are answered
+  identically, log the same `bad_credential` reason, and take the same
+  time to answer — there's no way to tell from the outside which of the
+  two happened.
+- **Verified credentials are cached for 5 minutes**, since bcrypt costs
+  tens to hundreds of milliseconds by design and a Basic credential is
+  re-presented on every request. This is not a revocation window: any
+  change to the basic source drops the cache, so removing a user takes
+  effect immediately.
+- **Under sustained load, verification can shed requests.** Concurrent
+  bcrypt comparisons are capped; past a 5-second wait a request gets
+  `503` with `Retry-After` and logs `basic_saturated`, rather than a
+  `401` that would wrongly blame the credential.
 - The `Authorization` header is **forwarded to the backend unchanged**,
-  like every other leg — nothing is stripped or injected.
+  like every other leg.
 - **Limitation**: browsers don't send `Authorization` on a CORS
-  preflight `OPTIONS`, so a preflight gets a `401`. That's already true
-  of the JWT leg; enabling basic auth doesn't change it either way.
+  preflight `OPTIONS`, so preflights get a `401` — already true of the
+  JWT leg.
 
 `inbound.auth.basic` is also settable via
 `--inbound-auth-basic-json`/`TAP_INBOUND_AUTH_BASIC_JSON`, a **JSON

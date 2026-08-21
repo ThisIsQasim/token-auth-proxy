@@ -107,7 +107,7 @@ func TestProxySAML_UnauthenticatedRedirectsToIdP(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = resp.Body.Close() }()
 
-	assert.Equal(t, http.StatusFound, resp.StatusCode)
+	assertRedirectedResp(t, resp)
 	assert.Contains(t, resp.Header.Get("Location"), "SAMLRequest=")
 }
 
@@ -143,7 +143,7 @@ func TestProxySAML_LoginCompletesAndSessionProxies(t *testing.T) {
 	protectedResp, err := client.Get(baseURL + "/protected") //nolint:noctx // test-only
 	require.NoError(t, err)
 	defer func() { _ = protectedResp.Body.Close() }()
-	assert.Equal(t, http.StatusOK, protectedResp.StatusCode, "a valid session must now proxy through")
+	assertProxiedResp(t, protectedResp) // a valid session must now proxy through
 }
 
 // TestProxySAML_EncryptedAssertion_LoginSucceeds proves sp_key_env/
@@ -202,7 +202,7 @@ inbound:
 	protectedResp, err := client.Get(baseURL + "/protected") //nolint:noctx // test-only
 	require.NoError(t, err)
 	defer func() { _ = protectedResp.Body.Close() }()
-	assert.Equal(t, http.StatusOK, protectedResp.StatusCode, "the decrypted assertion's session must authenticate normally")
+	assertProxiedResp(t, protectedResp) // the decrypted assertion's session authenticates normally
 }
 
 func TestProxySAML_TamperedOrExpiredSession_RedirectsNotRejects(t *testing.T) {
@@ -222,7 +222,8 @@ func TestProxySAML_TamperedOrExpiredSession_RedirectsNotRejects(t *testing.T) {
 
 		resp := getNoRedirect(t, baseURL+"/protected", &http.Cookie{Name: "saml_session", Value: "not-a-valid-session-token"})
 		defer func() { _ = resp.Body.Close() }()
-		assert.Equal(t, http.StatusFound, resp.StatusCode, "a tampered session must redirect to the idp, not 401 or 200")
+		// A tampered session redirects to the idp — not 401, and above all not 200.
+		assertRedirectedResp(t, resp)
 	})
 
 	t.Run("expired", func(t *testing.T) {
@@ -247,7 +248,8 @@ func TestProxySAML_TamperedOrExpiredSession_RedirectsNotRejects(t *testing.T) {
 		protectedResp, err := client.Get(baseURL + "/protected") //nolint:noctx // test-only
 		require.NoError(t, err)
 		defer func() { _ = protectedResp.Body.Close() }()
-		assert.Equal(t, http.StatusFound, protectedResp.StatusCode, "an expired session must redirect to the idp, not 401 or 200")
+		// An expired session redirects to the idp — not 401, and above all not 200.
+		assertRedirectedResp(t, protectedResp)
 	})
 }
 
@@ -362,7 +364,7 @@ inbound:
 	t.Run("no credential falls through to saml redirect", func(t *testing.T) {
 		resp := getNoRedirect(t, baseURL+"/")
 		defer func() { _ = resp.Body.Close() }()
-		assert.Equal(t, http.StatusFound, resp.StatusCode)
+		assertRedirectedResp(t, resp)
 	})
 }
 
@@ -432,5 +434,5 @@ func TestProxySAML_HotReload_DisablingStopsEnforcing(t *testing.T) {
 	disabled := samlConfigYAML(backend.URL, spBaseURL, idp, "/saml/acs", "saml_session", "") + "      disabled: true\n"
 	testutil.WriteAtomic(t, cfgPath, disabled)
 
-	assertStatusEventually(t, baseURL+"/", http.StatusOK, 3*time.Second)
+	assertBodyEventually(t, baseURL+"/", backendBody, 3*time.Second)
 }

@@ -328,7 +328,7 @@ func TestMiddleware_MuxWiring_HealthzStaysUnauthenticated(t *testing.T) {
 
 	rec2 := httptest.NewRecorder()
 	mux.ServeHTTP(rec2, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil))
-	assert.Equal(t, http.StatusUnauthorized, rec2.Code)
+	assertRejected(t, rec2, backend, 0, http.StatusUnauthorized, "unauthorized")
 }
 
 // TestMiddleware_HotReloadSwapsTrustedIssuer proves the end-to-end
@@ -353,18 +353,20 @@ func TestMiddleware_HotReloadSwapsTrustedIssuer(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, bearerRequest(t, tokenA))
-	require.Equal(t, http.StatusOK, rec.Code, "token A must work while A is trusted")
+	assertProxied(t, rec, backend, 1) // token A works while A is trusted
 
 	// Swap the trusted source from A to B.
 	source.set(&config.Config{Inbound: config.InboundConfig{Auth: config.InboundAuthConfig{JWT: []config.JWTSource{jwtSourceFor(idpB)}}}})
 
 	recA := httptest.NewRecorder()
 	handler.ServeHTTP(recA, bearerRequest(t, tokenA))
-	assert.Equal(t, http.StatusUnauthorized, recA.Code, "token A must stop working once A is no longer trusted")
+	// Token A must stop working once A is no longer trusted — and the
+	// backend must not have been reached again (still 1 hit).
+	assertRejected(t, recA, backend, 1, http.StatusUnauthorized, "unauthorized")
 
 	recB := httptest.NewRecorder()
 	handler.ServeHTTP(recB, bearerRequest(t, tokenB))
-	assert.Equal(t, http.StatusOK, recB.Code, "token B must work once B is trusted")
+	assertProxied(t, recB, backend, 2) // token B works once B is trusted
 }
 
 // --- composition matrix: JWT and SAML enabled together ---
@@ -468,7 +470,7 @@ func TestMiddleware_Composition_ValidSAMLSession_Forwards(t *testing.T) {
 }
 
 func TestMiddleware_Composition_ACSPath_NeverIntercepted(t *testing.T) {
-	handler, _, _, samlSrc := newCombinedMiddleware(t)
+	handler, backend, _, samlSrc := newCombinedMiddleware(t)
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, samlSrc.ACSPath, strings.NewReader(""))
 	rec := httptest.NewRecorder()
@@ -476,6 +478,7 @@ func TestMiddleware_Composition_ACSPath_NeverIntercepted(t *testing.T) {
 	assert.NotPanics(t, func() { handler.ServeHTTP(rec, req) },
 		"the acs path must dispatch to serveACS before either leg's enforcement runs, which is what avoids samlsp's RequireAccount-on-ACS-path panic")
 	assert.NotEqual(t, http.StatusUnauthorized, rec.Code, "a bare acs POST must not be treated as JWT's no-credential case")
+	assertNotProxied(t, rec, backend, 0)
 }
 
 func TestMiddleware_Composition_SAMLMetadataUnavailable_ServiceUnavailable(t *testing.T) {
@@ -585,7 +588,7 @@ func TestMiddleware_BasicOnly_MalformedHeaderRejects(t *testing.T) {
 }
 
 func TestMiddleware_BasicOnly_OtherSchemePassesThroughToNoCredential(t *testing.T) {
-	handler, _ := newBasicMiddleware(t)
+	handler, backend := newBasicMiddleware(t)
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
 	req.Header.Set("Authorization", "Digest username=alice")
@@ -595,8 +598,8 @@ func TestMiddleware_BasicOnly_OtherSchemePassesThroughToNoCredential(t *testing.
 
 	// Not Basic-shaped, so it's treated as no credential at all rather
 	// than as a malformed Basic one.
-	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 	assert.Equal(t, `Basic realm="test-realm", charset="UTF-8"`, rec.Header().Get("WWW-Authenticate"))
+	assertRejected(t, rec, backend, 0, http.StatusUnauthorized, "unauthorized")
 }
 
 func TestMiddleware_Composition_BasicCredentialDecidesBeforeJWT(t *testing.T) {
@@ -668,6 +671,7 @@ func TestMiddleware_Composition_BasicAndSAML_ACSPathIsStillDispatchedFirst(t *te
 
 	assert.NotEqual(t, http.StatusUnauthorized, rec.Code,
 		"the ACS callback must never be answered with a Basic challenge")
+	assertNotProxied(t, rec, backend, 0)
 }
 
 func TestMiddleware_Composition_BasicAndSAML_CredentiallessRequestRedirects(t *testing.T) {
@@ -694,7 +698,7 @@ func TestMiddleware_Composition_BasicAndSAML_CredentiallessRequestRedirects(t *t
 	// Documented consequence of SAML's step preceding the combined
 	// challenge: with SAML enabled, Basic only serves clients that send
 	// the header proactively — there's no browser password prompt.
-	assert.Equal(t, http.StatusFound, rec.Code)
+	assertRedirected(t, rec, backend, 0)
 	assert.Empty(t, rec.Header().Values("WWW-Authenticate"))
 
 	// A proactively-presented Basic credential is still honored.

@@ -64,10 +64,7 @@ func TestProxyBasic_ValidCredentialIsProxied(t *testing.T) {
 	proc := testutil.StartProxy(t, cfgPath)
 	baseURL := "http://" + proc.Addr
 
-	status, _, body, err := testutil.FetchWith(context.Background(), baseURL+"/", basicHeader("alice", "hunter2"))
-	require.NoError(t, err)
-	assert.Equal(t, http.StatusOK, status)
-	assert.Equal(t, "backend-ok", body)
+	assertProxied(t, baseURL+"/", basicHeader("alice", "hunter2"))
 }
 
 func TestProxyBasic_MissingCredentialIsChallenged(t *testing.T) {
@@ -81,9 +78,7 @@ func TestProxyBasic_MissingCredentialIsChallenged(t *testing.T) {
 	proc := testutil.StartProxy(t, cfgPath)
 	baseURL := "http://" + proc.Addr
 
-	status, header, _, err := testutil.FetchWith(context.Background(), baseURL+"/", nil)
-	require.NoError(t, err)
-	assert.Equal(t, http.StatusUnauthorized, status)
+	header := assertRejected(t, baseURL+"/", nil)
 	assert.Equal(t, `Basic realm="integration", charset="UTF-8"`, header.Get("WWW-Authenticate"))
 }
 
@@ -98,13 +93,9 @@ func TestProxyBasic_WrongPasswordIsRejected(t *testing.T) {
 	proc := testutil.StartProxy(t, cfgPath)
 	baseURL := "http://" + proc.Addr
 
-	status, _, _, err := testutil.FetchWith(context.Background(), baseURL+"/", basicHeader("alice", "wrong"))
-	require.NoError(t, err)
-	assert.Equal(t, http.StatusUnauthorized, status)
-
-	status, _, _, err = testutil.FetchWith(context.Background(), baseURL+"/", basicHeader("mallory", "hunter2"))
-	require.NoError(t, err)
-	assert.Equal(t, http.StatusUnauthorized, status, "an unknown user is rejected exactly like a wrong password")
+	assertRejected(t, baseURL+"/", basicHeader("alice", "wrong"))
+	// An unknown user is rejected exactly like a wrong password.
+	assertRejected(t, baseURL+"/", basicHeader("mallory", "hunter2"))
 }
 
 func TestProxyBasic_UserChangeHotReloads(t *testing.T) {
@@ -118,10 +109,7 @@ func TestProxyBasic_UserChangeHotReloads(t *testing.T) {
 	proc := testutil.StartProxy(t, cfgPath)
 	baseURL := "http://" + proc.Addr
 
-	status, _, body, err := testutil.FetchWith(context.Background(), baseURL+"/", basicHeader("alice", "hunter2"))
-	require.NoError(t, err)
-	require.Equal(t, http.StatusOK, status)
-	require.Equal(t, "backend-ok", body)
+	assertProxied(t, baseURL+"/", basicHeader("alice", "hunter2"))
 
 	// Rename the user: alice must stop working (proving the verified
 	// credential cache is dropped on a config change, not just that the
@@ -129,13 +117,12 @@ func TestProxyBasic_UserChangeHotReloads(t *testing.T) {
 	testutil.WriteAtomic(t, cfgPath, basicConfigYAML(backend.URL, "bob", hash))
 
 	assertHeaderStatusEventually(t, baseURL+"/", basicHeader("alice", "hunter2"), http.StatusUnauthorized, 5*time.Second)
+	assertRejected(t, baseURL+"/", basicHeader("alice", "hunter2"))
 	assertHeaderStatusEventually(t, baseURL+"/", basicHeader("bob", "hunter2"), http.StatusOK, 5*time.Second)
 
 	// ...and bob genuinely reaches the backend, rather than merely
 	// getting some other 200 out of the proxy.
-	_, _, body, err = testutil.FetchWith(context.Background(), baseURL+"/", basicHeader("bob", "hunter2"))
-	require.NoError(t, err)
-	assert.Equal(t, "backend-ok", body)
+	assertProxied(t, baseURL+"/", basicHeader("bob", "hunter2"))
 }
 
 func TestProxyBasic_PasswordHashFromEnvReference(t *testing.T) {
@@ -149,10 +136,7 @@ func TestProxyBasic_PasswordHashFromEnvReference(t *testing.T) {
 	proc := testutil.StartProxyWith(t, []string{"INTEGRATION_BASIC_HASH=" + hash}, "--config", cfgPath)
 	baseURL := "http://" + proc.Addr
 
-	status, _, body, err := testutil.FetchWith(context.Background(), baseURL+"/", basicHeader("alice", "hunter2"))
-	require.NoError(t, err)
-	assert.Equal(t, http.StatusOK, status)
-	assert.Equal(t, "backend-ok", body)
+	assertProxied(t, baseURL+"/", basicHeader("alice", "hunter2"))
 }
 
 func TestProxyBasic_PasswordHashFromFileReference(t *testing.T) {
@@ -172,10 +156,7 @@ func TestProxyBasic_PasswordHashFromFileReference(t *testing.T) {
 	proc := testutil.StartProxy(t, cfgPath)
 	baseURL := "http://" + proc.Addr
 
-	status, _, body, err := testutil.FetchWith(context.Background(), baseURL+"/", basicHeader("alice", "hunter2"))
-	require.NoError(t, err)
-	assert.Equal(t, http.StatusOK, status)
-	assert.Equal(t, "backend-ok", body)
+	assertProxied(t, baseURL+"/", basicHeader("alice", "hunter2"))
 }
 
 func TestProxyBasic_JSONOverrideFromEnv(t *testing.T) {
@@ -192,20 +173,16 @@ func TestProxyBasic_JSONOverrideFromEnv(t *testing.T) {
 
 	// No config file at all: basic auth is configurable from env/flags
 	// alone, like every other source.
-	status, header, _, err := testutil.FetchWith(context.Background(), baseURL+"/", nil)
-	require.NoError(t, err)
-	assert.Equal(t, http.StatusUnauthorized, status)
+	header := assertRejected(t, baseURL+"/", nil)
 	assert.Equal(t, `Basic realm="from-env", charset="UTF-8"`, header.Get("WWW-Authenticate"))
 
-	status, _, body, err := testutil.FetchWith(context.Background(), baseURL+"/", basicHeader("alice", "hunter2"))
-	require.NoError(t, err)
-	assert.Equal(t, http.StatusOK, status)
-	assert.Equal(t, "backend-ok", body)
+	assertProxied(t, baseURL+"/", basicHeader("alice", "hunter2"))
 }
 
 // assertHeaderStatusEventually is assertStatusEventually with request
 // headers — the reload cases need to poll while presenting a
-// credential, which the header-less version can't do.
+// credential, which the header-less version can't do. Same division of
+// labor: it waits, the caller asserts.
 func assertHeaderStatusEventually(t *testing.T, url string, header http.Header, wantStatus int, timeout time.Duration) {
 	t.Helper()
 	ctx := context.Background()

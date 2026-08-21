@@ -43,9 +43,7 @@ inbound:
 
 	// Drive one rejection so authn.rejections has a non-zero sample to
 	// find below.
-	status, _, _, err := testutil.FetchWith(context.Background(), baseURL+"/", nil)
-	require.NoError(t, err)
-	require.Equal(t, http.StatusUnauthorized, status)
+	assertRejected(t, baseURL+"/", nil)
 
 	var metricsBody string
 	require.Eventually(t, func() bool {
@@ -80,8 +78,11 @@ inbound:
 	baseURL := "http://" + proc.Addr
 
 	for _, path := range []string{"/healthz", "/metrics"} {
-		status, _, _, err := testutil.FetchWith(context.Background(), baseURL+path, nil)
+		status, _, body, err := testutil.FetchWith(context.Background(), baseURL+path, nil)
 		require.NoError(t, err)
 		assert.Equal(t, http.StatusOK, status, "%s should stay unauthenticated even with JWT enforcement configured", path)
+		// Both are served by the proxy itself, off the authenticated
+		// route entirely — so neither may be answered by the backend.
+		assertNotBackend(t, body)
 	}
 }

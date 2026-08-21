@@ -8,6 +8,8 @@ package integration
 
 import (
 	"context"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
@@ -18,6 +20,75 @@ import (
 
 	"github.com/ThisIsQasim/token-auth-proxy/test/testutil"
 )
+
+// backendBody is what the auth suites (jwt/saml/basic) give
+// testutil.NewBackend, and therefore the only response a request that
+// genuinely reached the backend can come back with. Asserting it —
+// rather than the status alone — is what separates "the backend
+// answered" from "the proxy answered": a 200 proves only that
+// *something* did, and a 401 proves only that something refused. Which
+// of the two happened is the entire question these tests exist to
+// answer, so every one of them states which it expected.
+//
+// The tests in this file predate that convention and use their own
+// bodies ("v1", "static-flag", ...) with assertBodyEventually below,
+// which checks the same property directly.
+const backendBody = "backend-ok"
+
+// assertProxied fetches url and asserts the request reached the backend
+// and came back with the backend's own response.
+func assertProxied(t *testing.T, url string, header http.Header) {
+	t.Helper()
+	status, _, body, err := testutil.FetchWith(context.Background(), url, header)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, status)
+	assert.Equal(t, backendBody, body, "the backend's own response must reach the client unchanged")
+}
+
+// assertNotBackend is the other half of that rule, in one place: a
+// response the proxy produced itself must not be the backend's.
+func assertNotBackend(t *testing.T, body string) {
+	t.Helper()
+	assert.NotEqual(t, backendBody, body, "the client must not receive the backend's response")
+}
+
+// assertRejected fetches url and asserts the proxy turned the request
+// away with a 401 — the only rejection status these suites produce —
+// without it reaching the backend. It returns the response headers so a
+// caller can go on to assert on the challenge.
+func assertRejected(t *testing.T, url string, header http.Header) http.Header {
+	t.Helper()
+	status, respHeader, body, err := testutil.FetchWith(context.Background(), url, header)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusUnauthorized, status)
+	assertNotBackend(t, body)
+	return respHeader
+}
+
+// assertProxiedResp and assertRedirectedResp are the same checks for a
+// caller that already holds a response — the SAML flows drive a
+// cookie-carrying http.Client through a real login rather than making
+// one-shot fetches, so they can't use the url-taking pair above.
+func assertProxiedResp(t *testing.T, resp *http.Response) {
+	t.Helper()
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, backendBody, readBody(t, resp), "the backend's own response must reach the client unchanged")
+}
+
+// assertRedirectedResp asserts resp is SAML's redirect to the IdP —
+// and, above all, not anything the backend produced.
+func assertRedirectedResp(t *testing.T, resp *http.Response) {
+	t.Helper()
+	assert.Equal(t, http.StatusFound, resp.StatusCode)
+	assertNotBackend(t, readBody(t, resp))
+}
+
+func readBody(t *testing.T, resp *http.Response) string {
+	t.Helper()
+	b, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	return string(b)
+}
 
 // assertBodyEventually polls url until it returns want or the timeout
 // elapses, tolerating transient errors (e.g. a request landing mid-reload).

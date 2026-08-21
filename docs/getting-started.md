@@ -97,6 +97,8 @@ and OIDC discovery.
 
 Configure authentication sources:
 
+- [Basic authentication guide](guides/basic-authentication.md) — a
+  username and password, with no identity provider to set up.
 - [JWT authentication guide](guides/jwt-authentication.md) — any
   JWT/OIDC issuer: multiple issuers, OIDC discovery, credential
   locations, common pitfalls.

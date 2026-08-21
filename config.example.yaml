@@ -61,10 +61,9 @@ timeouts:
 # jwt is a list (multiple trusted issuers); saml and basic are each at
 # most one source, not a list — see the README's Auth section for why.
 #
-# There is no separate "enabled" key: adding a jwt source below that
-# isn't disabled turns JWT verification on immediately. To stage a
-# fully-written jwt list (or the saml source) without going live, mark
-# every entry disabled: true.
+# There is no separate "enabled" key: adding a source below that isn't
+# disabled turns that mode on immediately. To stage a fully-written
+# source without going live, mark it disabled: true.
 #
 # Commented out entirely so the default `make run` config stays fully
 # functional without a real JWKS or IdP endpoint on hand.
@@ -111,7 +110,7 @@ timeouts:
 #       realm: "internal tools"
 #       users:
 #         - username: alice
-#           password_hash: "$2y$12$8kZq0Kk2eXbEwq3rIB1uCu9E6xU7ZKN7xg7bY5nWk3dRb1sJqPz9O"
+#           password_hash: "$2y$12$QOOD13Yck.hsJKS7hrNR8uUtZn2ygUwHk.WmrC6r49jtPUgc7YX3W"
 #         - username: bob
 #           password_hash: "${file:/run/secrets/bob.bcrypt}"
 #       # disabled: true # staged, not live yet

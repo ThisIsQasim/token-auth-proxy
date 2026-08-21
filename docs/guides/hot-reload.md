@@ -31,11 +31,16 @@ file — the flag simply never loses to the file for that one field.
 
 ## What hot-reloads and what doesn't
 
-`target` and `inbound.auth` (JWT sources, SAML source) hot-reload at
-runtime — add, remove, edit, or (re-)enable a source and it takes
-effect on the next request. `listen_addr` and `timeouts` are read once
-at startup; a later file change to those is logged as requiring a
-restart, not silently ignored or silently applied.
+`target` and `inbound.auth` (JWT sources, the SAML source, the Basic
+source and its user list) hot-reload at runtime — add, remove, edit, or
+(re-)enable a source and it takes effect on the next request.
+`listen_addr` and `timeouts` are read once at startup; a later file
+change to those is logged as requiring a restart, not silently ignored
+or silently applied.
+
+Removing a basic-auth user is immediate: the proxy caches verified
+credentials for a few minutes to avoid paying bcrypt's cost per
+request, but any change to the basic source throws that cache away.
 
 The backend target swap is atomic: a request already in flight when the
 target changes always completes against the backend it started with —
@@ -106,12 +111,35 @@ Two things worth knowing before relying on this:
 - `listen_addr`/`timeouts` still won't hot-reload even from a
   ConfigMap — those changes need a rollout, same as anywhere else.
 
+## Value references and reloads
+
+Any string in the config *file* can come from elsewhere, and is
+re-resolved on **every** reload:
+
+```yaml
+target: "${env:BACKEND_URL}"
+password_hash: "${file:/run/secrets/alice.bcrypt}"
+```
+
+Full rules are in the [README](../../README.md#value-references-env--file);
+what matters for reloading:
+
+- **A referenced file isn't watched.** Only the config file's directory
+  is. Rotating a mounted Secret won't trigger a reload on its own —
+  touch the config file (or roll the pods) if you need it immediate.
+- **A broken reference fails the reload, not just startup.** Unset the
+  environment variable a file references and the next reload is
+  rejected, keeping the previous config live — same as a malformed file.
+- **Only the file layer is interpolated.** Flags, `TAP_` vars and the
+  `TAP_*_JSON` blobs below are literal.
+
 ## Overriding a list/object field via env var
 
-`inbound.auth.jwt` and `inbound.auth.saml` can also be set via
-`TAP_INBOUND_AUTH_JWT_JSON` (a JSON array) and
-`TAP_INBOUND_AUTH_SAML_JSON` (a JSON object) — inline JSON, never a file
-path, using the same snake_case field names as YAML. Like any other env
+`inbound.auth.jwt`, `inbound.auth.saml` and `inbound.auth.basic` can
+also be set via `TAP_INBOUND_AUTH_JWT_JSON` (a JSON array),
+`TAP_INBOUND_AUTH_SAML_JSON` and `TAP_INBOUND_AUTH_BASIC_JSON` (JSON
+objects) — inline JSON, never a file path, using the same snake_case
+field names as YAML. Like any other env
 var, this **fully replaces** the file's value for that field (not
 merged) and is re-applied on every hot-reload, so it keeps winning over
 whatever the file says. Useful for injecting a source from a secrets
@@ -121,8 +149,8 @@ longer than a source or two, prefer the file.
 ## Troubleshooting a reload that didn't take effect
 
 1. Check the logs — every accepted reload logs `"config reloaded"` with
-   the new `target`/`auth_enabled`/`jwt_sources`/`saml_configured`
-   summary; a rejected one logs `"config reload failed, keeping
+   the new `target`/`auth_enabled`/`jwt_sources`/`saml_configured`/
+   `basic_configured` summary; a rejected one logs `"config reload failed, keeping
    previous config"` with the parse/validation error instead, and keeps
    the old config live.
 2. Confirm you didn't change `listen_addr`/`timeouts` — those need a

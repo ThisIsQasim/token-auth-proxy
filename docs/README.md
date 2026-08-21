@@ -13,8 +13,11 @@ request is authenticated before forwarding it. It forwards everything
 it lets through unchanged to one configured `target` — no path-based
 routing, no request rewriting, no load balancing.
 
-It supports two ways of authenticating a request:
+It supports three ways of authenticating a request:
 
+- **HTTP Basic** — a fixed list of users with bcrypt password hashes,
+  for when the thing you're protecting has no users of its own. See the
+  [Basic guide](guides/basic-authentication.md).
 - **JWT bearer verification** — one or more trusted issuers, keys
   fetched from a JWKS URL or resolved via OIDC discovery, signature/
   expiry/audience checking. See the
@@ -23,9 +26,10 @@ It supports two ways of authenticating a request:
   the IdP, ACS callback, session cookie. See the
   [SAML guide](guides/saml-sso.md).
 
-Neither one stores a credential in the proxy's own config: JWT
-verification checks a signature against the issuer's keys, and SAML's
-login flow means the password only ever goes to the IdP.
+Only Basic puts anything in the proxy's own config, and even then it's
+a bcrypt verifier rather than a password — a hash can't be replayed as
+a credential. JWT checks a signature against the issuer's keys, and
+SAML's login flow sends the password only to the IdP.
 
 It also has:
 
@@ -43,6 +47,7 @@ that, this isn't the tool for it.
 
 - **New here?** Start with [Getting Started](getting-started.md) —
   install the binary and configure JWT verification.
+- **Just need a username and password?** → [Basic authentication guide](guides/basic-authentication.md)
 - **Setting up JWT verification?** → [JWT authentication guide](guides/jwt-authentication.md)
 - **Trusting Kubernetes service account tokens (single- or multi-cluster)?** → [Kubernetes guide](guides/kubernetes-tokens.md)
 - **Authenticating a GitHub Actions workflow?** → [GitHub Actions guide](guides/github-actions.md)
