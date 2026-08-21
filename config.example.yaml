@@ -2,6 +2,18 @@
 # var, which take precedence over this file and are re-applied on every
 # reload (not just at startup) — see the README's Configuration section.
 
+# Any string value in this file may pull its value in from elsewhere:
+#   ${env:NAME}       the environment variable NAME (must be set)
+#   ${file:/path}     the file's contents, one trailing newline stripped
+#                     (a relative path resolves against this file's
+#                     directory)
+# Both can appear mid-string and more than once ("https://${env:HOST}/x"),
+# and are re-resolved on every reload. '$' is only special immediately
+# before '{', so values that contain a bare '$' — a bcrypt hash, say —
+# need no escaping; write "$${" if you ever need a literal "${". A
+# reference that can't be resolved fails the load and keeps the previous
+# config running. See the README's "Value references" section.
+
 # Observability (traces/metrics/logs) is configured entirely via
 # standard OTEL_* environment variables, not this file — there is no
 # telemetry:/otel: section here to look for. /metrics is always mounted
@@ -29,22 +41,25 @@ timeouts:
   dial: 5s
   response_header: 15s
 
-# Optional. Describes trusted credential sources. Both JWT and SAML are
+# Optional. Describes trusted credential sources. All three are
 # enforced: a request matching a configured, non-disabled jwt source's
 # issuer must carry a valid token or the proxy responds 401; with a
-# saml source configured and enabled, an unauthenticated request is
-# redirected to the IdP instead (see the README's Auth section for how
-# the two combine when both are configured). Like target, inbound.auth
-# hot-reloads with no process restart, for both jwt and saml.
+# basic source configured, a request must carry a matching
+# username/password or gets a 401 challenge; with a saml source
+# configured and enabled, an unauthenticated request is redirected to
+# the IdP instead (see the README's Auth section for how they combine
+# when more than one is configured). Like target, inbound.auth
+# hot-reloads with no process restart.
 #
-# jwt/saml can also be set (or overridden) via --inbound-auth-jwt-json/
-# TAP_INBOUND_AUTH_JWT_JSON (a JSON array, fully replacing the jwt list)
-# and --inbound-auth-saml-json/TAP_INBOUND_AUTH_SAML_JSON (a JSON
-# object, fully replacing the saml source) — see the README's Auth
-# section. Both forms share the same field names.
+# Each can also be set (or overridden) via --inbound-auth-jwt-json/
+# TAP_INBOUND_AUTH_JWT_JSON (a JSON array, fully replacing the jwt
+# list), --inbound-auth-saml-json/TAP_INBOUND_AUTH_SAML_JSON and
+# --inbound-auth-basic-json/TAP_INBOUND_AUTH_BASIC_JSON (JSON objects,
+# fully replacing that source) — see the README's Auth section. All
+# forms share the same field names.
 #
-# jwt is a list (multiple trusted issuers); saml is at most one source,
-# not a list — see the README's Auth section for why.
+# jwt is a list (multiple trusted issuers); saml and basic are each at
+# most one source, not a list — see the README's Auth section for why.
 #
 # There is no separate "enabled" key: adding a jwt source below that
 # isn't disabled turns JWT verification on immediately. To stage a
@@ -77,6 +92,29 @@ timeouts:
 #             name: partner_session
 #         jwks_cache_ttl: 10m
 #         disabled: true # staged, not live yet
+#
+#     # At most one basic source, with a fixed list of users. Passwords
+#     # are only ever stored as bcrypt hashes — a plaintext password
+#     # here is rejected at startup, not silently accepted. Generate one
+#     # with `htpasswd -bnBC 12 "" 'password' | tr -d ':\n'`.
+#     #
+#     # A bcrypt hash is a verifier, not a credential — it can't be
+#     # replayed against this proxy — so it's fine directly in this
+#     # file, quoted as below. Where you'd rather have it delivered by
+#     # your secret management (a Kubernetes Secret, /run/secrets/...),
+#     # the ${file:...}/${env:...} references described at the top of
+#     # this file work here like anywhere else.
+#     basic:
+#       # Optional; defaults to "restricted". Shown by browsers in
+#       # their login dialog, and used by clients to scope a saved
+#       # password, so it's worth setting to something recognizable.
+#       realm: "internal tools"
+#       users:
+#         - username: alice
+#           password_hash: "$2y$12$8kZq0Kk2eXbEwq3rIB1uCu9E6xU7ZKN7xg7bY5nWk3dRb1sJqPz9O"
+#         - username: bob
+#           password_hash: "${file:/run/secrets/bob.bcrypt}"
+#       # disabled: true # staged, not live yet
 #
 #     saml:
 #       name: corp-sso

@@ -204,3 +204,78 @@ func TestExtractToken(t *testing.T) {
 		assert.False(t, ok)
 	})
 }
+
+func TestExtractBasic(t *testing.T) {
+	tests := []struct {
+		name     string
+		build    func(r *http.Request)
+		wantRes  basicExtraction
+		wantUser string
+		wantPass string
+	}{
+		{
+			name:     "well-formed credential",
+			build:    func(r *http.Request) { r.SetBasicAuth("alice", "hunter2") },
+			wantRes:  basicPresent,
+			wantUser: "alice",
+			wantPass: "hunter2",
+		},
+		{
+			name:     "scheme matched case-insensitively",
+			build:    func(r *http.Request) { r.Header.Set("Authorization", "bAsIc YWxpY2U6aHVudGVyMg==") },
+			wantRes:  basicPresent,
+			wantUser: "alice",
+			wantPass: "hunter2",
+		},
+		{
+			name:     "password containing a colon",
+			build:    func(r *http.Request) { r.SetBasicAuth("alice", "a:b:c") },
+			wantRes:  basicPresent,
+			wantUser: "alice",
+			wantPass: "a:b:c",
+		},
+		{
+			name:    "empty password",
+			build:   func(r *http.Request) { r.SetBasicAuth("alice", "") },
+			wantRes: basicPresent, wantUser: "alice",
+		},
+		{name: "no authorization header", build: func(r *http.Request) {}, wantRes: basicAbsent},
+		{
+			name:    "bearer token is not a basic credential",
+			build:   func(r *http.Request) { r.Header.Set("Authorization", "Bearer abc.def.ghi") },
+			wantRes: basicAbsent,
+		},
+		{
+			name:    "different scheme with the same prefix",
+			build:   func(r *http.Request) { r.Header.Set("Authorization", "BasicPlus YWxpY2U6eA==") },
+			wantRes: basicAbsent,
+		},
+		{
+			name:    "scheme with nothing after it",
+			build:   func(r *http.Request) { r.Header.Set("Authorization", "Basic") },
+			wantRes: basicAbsent,
+		},
+		{
+			name:    "invalid base64",
+			build:   func(r *http.Request) { r.Header.Set("Authorization", "Basic !!!not-base64!!!") },
+			wantRes: basicMalformed,
+		},
+		{
+			name:    "decodes without a colon",
+			build:   func(r *http.Request) { r.Header.Set("Authorization", "Basic YWxpY2U=") }, // "alice"
+			wantRes: basicMalformed,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
+			tt.build(r)
+
+			user, pass, res := extractBasic(r)
+			assert.Equal(t, tt.wantRes, res)
+			assert.Equal(t, tt.wantUser, user)
+			assert.Equal(t, tt.wantPass, pass)
+		})
+	}
+}

@@ -314,3 +314,54 @@ func TestLoadLayered_SAMLJSONFieldOverride_WrongShapeStillErrors(t *testing.T) {
 	_, err := loadLayered(path, fs)
 	require.Error(t, err, "a well-formed but wrongly-shaped JSON value must still fail, not be silently accepted")
 }
+
+func TestLoadLayered_BasicJSONFieldOverride_EnvAndFlag(t *testing.T) {
+	hash, err := testBasicHash()
+	require.NoError(t, err)
+
+	path := writeTempFile(t, `
+target: http://from-file:9000
+inbound:
+  auth:
+    basic:
+      realm: from-file
+      users:
+        - username: from-file
+          password_hash: `+hash+`
+`)
+
+	t.Setenv("TAP_INBOUND_AUTH_BASIC_JSON",
+		`{"realm":"from-env","users":[{"username":"from-env","password_hash":"`+hash+`"}]}`)
+
+	fs := newFlagSet(t)
+	cfg, err := loadLayered(path, fs)
+	require.NoError(t, err)
+	require.NotNil(t, cfg.Inbound.Auth.Basic)
+	assert.Equal(t, "from-env", cfg.Inbound.Auth.Basic.Realm)
+	require.Len(t, cfg.Inbound.Auth.Basic.Users, 1, "the override must fully replace the file's source, not merge into it")
+	assert.Equal(t, "from-env", cfg.Inbound.Auth.Basic.Users[0].Username)
+
+	fs = newFlagSet(t, "--inbound-auth-basic-json",
+		`{"realm":"from-flag","users":[{"username":"from-flag","password_hash":"`+hash+`"}]}`)
+	cfg, err = loadLayered(path, fs)
+	require.NoError(t, err)
+	require.NotNil(t, cfg.Inbound.Auth.Basic)
+	assert.Equal(t, "from-flag", cfg.Inbound.Auth.Basic.Realm, "flag must win over env")
+}
+
+func TestResolve_BasicJSONFieldOverride_NoFile(t *testing.T) {
+	hash, err := testBasicHash()
+	require.NoError(t, err)
+
+	t.Setenv("TAP_TARGET", "http://static:9000")
+	t.Setenv("TAP_INBOUND_AUTH_BASIC_JSON",
+		`{"users":[{"username":"alice","password_hash":"`+hash+`"}]}`)
+
+	src, err := Resolve(newFlagSet(t))
+	require.NoError(t, err)
+	require.NotNil(t, src.Config)
+	require.NotNil(t, src.Config.Inbound.Auth.Basic)
+	assert.True(t, src.Config.Inbound.Auth.BasicEnabled())
+	assert.Equal(t, defaultBasicRealm, src.Config.Inbound.Auth.Basic.Realm, "defaults still apply to a JSON-provided source")
+	assert.Equal(t, "alice", src.Config.Inbound.Auth.Basic.Users[0].Username)
+}

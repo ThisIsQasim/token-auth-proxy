@@ -63,21 +63,23 @@ func samlOnError(logger *slog.Logger) func(w http.ResponseWriter, r *http.Reques
 	}
 }
 
-// rejectUnavailable responds 503 with a Retry-After hint when
-// SAMLRegistry.Provider couldn't build or refresh a provider — distinct
-// from JWT's uniform 401-for-everything (see reject in middleware.go)
-// because this specifically means "the operator's configured
-// idp_metadata_url is unreachable or malformed," not "your credential
-// is bad." retryAfter should be the same window the registry itself
-// negative-caches the failure for (SAMLRegistry.retry), so a client
-// that honors Retry-After won't retry any sooner than the registry
-// would actually attempt a rebuild.
-func rejectUnavailable(w http.ResponseWriter, logger *slog.Logger, r *http.Request, err error, retryAfter time.Duration) {
+// rejectUnavailable responds 503 with a Retry-After hint for a failure
+// that isn't the caller's fault — distinct from JWT's and Basic's
+// uniform 401-for-everything (see reject in middleware.go) because
+// these mean "this proxy currently can't verify anything," not "your
+// credential is bad." Two things use it: SAMLRegistry.Provider failing
+// to build or refresh a provider (the configured idp_metadata_url is
+// unreachable or malformed), and Basic verification being saturated
+// (see BasicRegistry.sem). retryAfter should be the window the caller
+// would actually have to wait — the registry's own negative-cache
+// duration for SAML — so a client honoring it doesn't retry sooner
+// than the answer could possibly change.
+func rejectUnavailable(w http.ResponseWriter, logger *slog.Logger, r *http.Request, why reason, err error, retryAfter time.Duration) {
 	w.Header().Set("Retry-After", strconv.Itoa(int(retryAfter.Seconds())))
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusServiceUnavailable)
 	_, _ = w.Write([]byte("service unavailable"))
 
-	logger.WarnContext(r.Context(), "rejected request", "reason", string(reasonSAMLMetadataUnavailable), "path", r.URL.Path, "err", err)
-	recordRejection(r.Context(), reasonSAMLMetadataUnavailable)
+	logger.WarnContext(r.Context(), "rejected request", "reason", string(why), "path", r.URL.Path, "err", err)
+	recordRejection(r.Context(), why)
 }

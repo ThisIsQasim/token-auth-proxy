@@ -3,14 +3,15 @@
 A minimal HTTP reverse proxy built on Go's standard library (`net/http` /
 `net/http/httputil`). It forwards every request to a single backend
 target, configured via a YAML file (with hot-reload), CLI flags, and/or
-environment variables. It can verify inbound JWT bearer credentials and/or
-enforce an interactive SAML SP login before forwarding (see [Auth](#auth)
-below) — there's still no per-path routing, every request goes to the
-same `target` regardless of which auth mode (if any) it satisfied.
+environment variables. It can check inbound HTTP Basic credentials,
+verify JWT bearer tokens, and/or enforce an interactive SAML SP login
+before forwarding (see [Auth](#auth) below) — there's still no per-path
+routing, every request goes to the same `target` regardless of which
+auth mode (if any) it satisfied.
 
 📖 **New here?** This README is the exhaustive technical reference. For
 an introduction, example use cases, a getting-started walkthrough, and
-task-oriented guides (JWT, SAML, hot-reload, observability), see
+task-oriented guides (Basic, JWT, SAML, hot-reload, observability), see
 **[the docs](./docs/README.md)**.
 
 ## How it works
@@ -34,7 +35,7 @@ task-oriented guides (JWT, SAML, hot-reload, observability), see
   hot-reload: they're read once, when the listener/transport are built
   at startup, so a later file change to those is logged as requiring a
   restart, not silently ignored. Everything else — `target` and
-  `inbound.auth` (the trusted JWT/SAML sources — see
+  `inbound.auth` (the trusted Basic/JWT/SAML sources — see
   [Auth](#auth) below) — hot-reloads at runtime.
 - A malformed or invalid config write is logged and discarded — the
   previously loaded config stays live, so a transient bad write never
@@ -62,6 +63,7 @@ for the file form:
 | `--timeout-response-header` | `TAP_TIMEOUT_RESPONSE_HEADER` | `timeouts.response_header` | `15s` |
 | `--inbound-auth-jwt-json` | `TAP_INBOUND_AUTH_JWT_JSON` | `inbound.auth.jwt` | *(none — file's list, if any, passes through)* |
 | `--inbound-auth-saml-json` | `TAP_INBOUND_AUTH_SAML_JSON` | `inbound.auth.saml` | *(none — file's source, if any, passes through)* |
+| `--inbound-auth-basic-json` | `TAP_INBOUND_AUTH_BASIC_JSON` | `inbound.auth.basic` | *(none — file's source, if any, passes through)* |
 
 A no-file, flags-only run, for example:
 
@@ -72,22 +74,83 @@ token-auth-proxy --target http://localhost:9000 --listen-addr :8080
 `GET /healthz` always returns `200 OK` without touching the backend —
 mount it as a Kubernetes liveness/readiness probe.
 
+### Value references (`${env:...}` / `${file:...}`)
+
+Any string value **in the config file** can pull its content in from
+somewhere else, resolved after the YAML is parsed and before it's
+validated:
+
+```yaml
+target: "${env:BACKEND_URL}"
+inbound:
+  auth:
+    basic:
+      users:
+        - username: alice
+          password_hash: "${file:/run/secrets/alice.bcrypt}"
+```
+
+- **`${env:NAME}`** — the environment variable `NAME`. Unset is an
+  error (the load fails rather than silently substituting an empty
+  value); set-but-empty resolves to `""`.
+- **`${file:/path}`** — the file's contents with exactly one trailing
+  newline stripped, so `echo secret > f` and `printf secret > f` behave
+  the same. A relative path resolves against **the config file's own
+  directory**, not the process's working directory. Files over 1 MiB
+  are rejected.
+- Both can appear mid-string and more than once:
+  `"https://${env:IDP_HOST}/metadata"`.
+- **`$` is only special immediately before `{`.** Everything else —
+  including a bcrypt hash like `$2y$12$...`, the one value in this
+  schema guaranteed to contain `$` — passes through byte-for-byte with
+  no escaping. Write `$${` for a literal `${`.
+- `${...}` that isn't a reference (`${HOME}`, `${C:\path}`) is left
+  exactly as written. A reference naming a type that doesn't exist
+  (`${vault:x}`) is an error, not a passthrough — it's a typo in
+  something clearly meant as a reference.
+- Values are resolved **once**, never rescanned: an environment
+  variable whose value happens to contain `${file:/etc/shadow}` stays
+  that literal text.
+- Errors name the config key that failed
+  (`inbound.auth.basic.users[0].password_hash: ${env:X}: environment
+  variable is not set`), and a failure during a *reload* keeps the
+  previously loaded config live, exactly like a malformed file does.
+
+Two boundaries worth knowing:
+
+- **Only the file layer is interpolated.** Flags, `TAP_` env vars and
+  the `TAP_*_JSON` blobs are taken literally (they're already coming
+  from the environment), and `--config`/`TAP_CONFIG` selects the file
+  itself, so it can't contain a reference. A consequence: an
+  unresolvable reference in the file fails the load even when a
+  `TAP_*_JSON` override would have replaced that whole section anyway.
+- **Referenced files aren't watched.** The config watcher watches the
+  config file's directory only, so rotating a `${file:...}` secret
+  takes effect on the next config reload or restart, not the moment the
+  file changes.
+
+The existing `session_signing_key_env` / `sp_key_env` fields (which
+name an environment *variable*) are unchanged and keep working; they
+predate this and remain the documented way to supply those two secrets.
+
 ## Auth
 
 `inbound`/`outbound` are top-level config sections, siblings of
-`target`/`listen_addr`/`timeouts`. `inbound.auth.jwt` (a **list**) and
+`target`/`listen_addr`/`timeouts`. `inbound.auth.jwt` (a **list**),
 `inbound.auth.saml` (**at most one** source, not a list — no per-path
-routing exists to pick among multiple IdPs by) describe trusted
-credential sources. `outbound` is reserved for a later pass (rewriting
-credentials on the backend leg, e.g. verifying an inbound SAML assertion
-and minting an outbound OIDC-style JWT). See
+routing exists to pick among multiple IdPs by) and `inbound.auth.basic`
+(**at most one** source, for its own reason — a challenge names exactly
+one realm, and two user lists guarding one backend is one user list)
+describe trusted credential sources. `outbound` is reserved for a later
+pass (rewriting credentials on the backend leg, e.g. verifying an
+inbound SAML assertion and minting an outbound OIDC-style JWT). See
 [`config.example.yaml`](./config.example.yaml) for a full commented-out
-example of both.
+example of each.
 
-**There is no separate `enabled` switch** for either — a source counts
-as active unless it's `disabled: true`; the same field also lets you
-pull one JWT source out of rotation, or stage a source without going
-live, without touching the rest. Both `target` and `inbound.auth`
+**There is no separate `enabled` switch** for any of them — a source
+counts as active unless it's `disabled: true`; the same field also lets
+you pull one JWT source out of rotation, or stage a source without
+going live, without touching the rest. Both `target` and `inbound.auth`
 hot-reload together when `--config`/`TAP_CONFIG` is set — add, remove,
 edit, or (re-)enable a source and it takes effect on the next request,
 no restart.
@@ -147,6 +210,78 @@ winning over whatever the file says for that field. Duration fields
 inside the JSON (`jwks_cache_ttl`, ...) should be written as strings
 (`"10m"`), the same as in YAML.
 
+### Basic (enforced)
+
+`inbound.auth.basic` is a fixed list of users with bcrypt password
+hashes. With it configured and not disabled, a request must present a
+matching `Authorization: Basic` credential or it never reaches the
+backend.
+
+```yaml
+inbound:
+  auth:
+    basic:
+      realm: "internal tools"      # optional, defaults to "restricted"
+      users:
+        - username: alice
+          password_hash: "$2y$12$..."
+        - username: bob
+          password_hash: "${file:/run/secrets/bob.bcrypt}"
+```
+
+- **No `name` field**, unlike the JWT and SAML sources: there's only
+  ever one basic source, so there's nothing to disambiguate — it's
+  `source=basic` in logs.
+- **bcrypt only.** `password_hash` must be a bcrypt hash; a plaintext
+  password is rejected at config-load time, naming the user, rather
+  than silently rejecting every login afterwards. Generate one with
+  `htpasswd -bnBC 12 "" 'password' | tr -d ':\n'`. The hash is a
+  verifier, not a credential — it can't be replayed against the proxy —
+  so it's fine directly in the config file; `${file:...}`/`${env:...}`
+  ([above](#value-references-env--file)) work here too if you'd rather
+  it came from your secret management.
+- **`realm`** is what a browser shows in its login dialog and what
+  clients scope a saved password to. Quotes, backslashes and control
+  characters are rejected at load time.
+- **On rejection**: `401` with
+  `WWW-Authenticate: Basic realm="...", charset="UTF-8"` and a minimal
+  plaintext body. An unknown username and a wrong password are
+  answered identically, log the same `bad_credential` reason, and take
+  the same time to answer (an unknown user is still compared against a
+  configured hash) — `/metrics` is unauthenticated, so a distinction
+  anywhere would be a public username-enumeration oracle.
+- **Verified credentials are cached** for 5 minutes, keyed by a
+  per-process HMAC of the presented credential. bcrypt is deliberately
+  slow (tens to hundreds of milliseconds per comparison, by design),
+  and a Basic credential is re-presented on *every* request — one page
+  load with twenty subresources would otherwise pay that cost twenty
+  times. The cache is **not** a revocation window: any change to the
+  basic source drops it entirely on the next request, so removing a
+  user takes effect immediately.
+- **Concurrent comparisons are bounded** (half the CPUs, minimum one).
+  Past a 5-second wait a request gets `503` with `Retry-After`, not a
+  `401` — that's capacity, not a bad credential, and it logs as
+  `basic_saturated`. Without this bound, wrong passwords would be a
+  cheap way for an unauthenticated client to exhaust the CPU the
+  proxying path needs.
+- The `Authorization` header is **forwarded to the backend unchanged**,
+  like every other leg — nothing is stripped or injected.
+- **Limitation**: browsers don't send `Authorization` on a CORS
+  preflight `OPTIONS`, so a preflight gets a `401`. That's already true
+  of the JWT leg; enabling basic auth doesn't change it either way.
+
+`inbound.auth.basic` is also settable via
+`--inbound-auth-basic-json`/`TAP_INBOUND_AUTH_BASIC_JSON`, a **JSON
+object** fully replacing the source, following the same
+precedence/hot-reload rules as the JWT and SAML overrides:
+
+```sh
+TAP_INBOUND_AUTH_BASIC_JSON='{"realm":"internal","users":[{"username":"alice","password_hash":"$2y$12$..."}]}'
+```
+
+Note this path is **not** interpolated (it's already an environment
+value), so `${file:...}` inside the JSON stays literal text.
+
 ### SAML (enforced)
 
 The SAML source is a full interactive SP integration: SP-initiated
@@ -200,16 +335,36 @@ limitation below for exactly who that does and doesn't unblock.
 **JSON object** (not an array) fully replacing the source, following
 the same precedence/hot-reload rules as the JWT override above.
 
-**When both JWT and SAML are configured and enabled**, per request: the
-ACS path is always dispatched to SAML first, regardless of anything
-else; then, if a JWT-shaped credential was actually presented (any
-configured `credentials` location had a non-empty value), JWT alone
-decides — a bad bearer token gets `401`, never a SAML redirect; only a
-genuinely credential-less request falls through to SAML's
-redirect-or-forward decision. A request that's neither a JWT-only nor a
-SAML-only shape (e.g. a JSON API client with no way to display an IdP
-login page) has no special handling — see the content-negotiation gap
-below.
+**When more than one mode is configured and enabled**, per request, in
+order:
+
+1. The **ACS path** is always dispatched to SAML first, regardless of
+   anything else.
+2. If an `Authorization: Basic` credential was presented, **basic alone
+   decides** — a bad password gets `401`, never a SAML redirect and
+   never a JWT check. Basic is ahead of JWT deliberately: a JWT source
+   configured to read the `Authorization` header with no `prefix` would
+   otherwise swallow a Basic credential and reject it as a malformed
+   token. (That exact pairing is rejected at config-load time, so this
+   ordering is a second line of defense rather than the only one.) The
+   consequence to know: a client sending a Basic header *and* a JWT in
+   a cookie or query parameter is judged on the Basic credential alone.
+3. Otherwise, if a **JWT**-shaped credential was actually presented
+   (any configured `credentials` location had a non-empty value), JWT
+   alone decides — a bad bearer token gets `401`, never a SAML
+   redirect.
+4. Otherwise, if **SAML** is enabled, it makes the redirect-or-forward
+   decision. Note this comes *before* step 5, so with SAML enabled a
+   credential-less request is redirected to the IdP and never sees a
+   Basic challenge — basic auth then only serves clients that send the
+   header proactively, with no browser password prompt.
+5. Otherwise the `401` carries a challenge for **each** enabled mode
+   (`Basic realm="..."` and/or `Bearer`), as separate
+   `WWW-Authenticate` header lines.
+
+A request that's neither a JWT-only nor a SAML-only shape (e.g. a JSON
+API client with no way to display an IdP login page) has no special
+handling — see the content-negotiation gap below.
 
 **Not implemented, deliberately out of scope for now:**
 
@@ -265,8 +420,9 @@ couldn't have been silently relied upon before.
   Prometheus counter (regardless of OTLP config, since `/metrics` is
   always live) attributed by the same rejection reason already used in
   structured logs (`no_credential`, `bad_signature`, `expired`,
-  `keys_unavailable`, `saml_metadata_unavailable`, ...). Generic HTTP
-  metrics can't tell you *why* a request got a 401/403/503; this can.
+  `keys_unavailable`, `bad_credential`, `saml_metadata_unavailable`,
+  ...). Generic HTTP metrics can't tell you *why* a request got a
+  401/403/503; this can.
 - Logs stay the same stdout JSON either way (`slog`); when trace export
   is configured, request-scoped log lines additionally carry
   `trace_id`/`span_id` and get forwarded to the OTel Logs SDK.

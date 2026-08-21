@@ -6,6 +6,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 // Defaults for fields left zero-valued in a JWTSource or SAMLSource.
@@ -24,6 +26,12 @@ const minSessionSigningKeyLen = 32
 
 // defaultAlgorithm is used when a JWTSource doesn't list any Algorithms.
 const defaultAlgorithm = "RS256"
+
+// defaultBasicRealm is the realm advertised in the WWW-Authenticate
+// challenge when a BasicSource doesn't name one. It's user-visible — a
+// browser prints it verbatim in its login dialog — which is exactly why
+// the field exists to be overridden.
+const defaultBasicRealm = "restricted"
 
 // allowedAlgorithms is the set of JWT signing algorithms a source may
 // configure. No HS* (no shared-secret support for JWT sources, since
@@ -86,19 +94,31 @@ type OutboundConfig struct{}
 // out). A single optional source sidesteps needing that selection logic
 // at all — see the Handoff notes for where per-path routing would need
 // to be designed if multi-IdP SAML is ever wanted later.
+//
+// Basic is likewise at most one source, but for its own reason rather
+// than SAML's: a Basic challenge names exactly one realm, and with no
+// per-path routing there's nothing to pick a second realm's user list
+// by (two user lists guarding the same single Target is one user
+// list). Unlike JWT and SAML it carries no Name field at all — there's
+// only ever one of it, so logs identify it as "basic" and there's
+// nothing for Validate's uniqueness checks to disambiguate.
 type InboundAuthConfig struct {
-	JWT  []JWTSource `yaml:"jwt,omitempty"`
-	SAML *SAMLSource `yaml:"saml,omitempty"`
+	JWT   []JWTSource  `yaml:"jwt,omitempty"`
+	SAML  *SAMLSource  `yaml:"saml,omitempty"`
+	Basic *BasicSource `yaml:"basic,omitempty"`
 }
 
-// applyDefaults fills in every JWT source's own defaults, and SAML's if
-// configured.
+// applyDefaults fills in every JWT source's own defaults, and SAML's
+// and Basic's if configured.
 func (a *InboundAuthConfig) applyDefaults() {
 	for i := range a.JWT {
 		a.JWT[i].applyDefaults()
 	}
 	if a.SAML != nil {
 		a.SAML.applyDefaults()
+	}
+	if a.Basic != nil {
+		a.Basic.applyDefaults()
 	}
 }
 
@@ -112,13 +132,13 @@ func (a *InboundAuthConfig) applyDefaults() {
 // report true while none does.
 //
 // Enabled alone is deliberately too broad to gate a single enforcement
-// mode on: it's true for a JWT-only, a SAML-only, or a combined config
-// alike. Code that needs to know which mode(s) are actually active
-// must use JWTEnabled/SAMLEnabled instead — see
-// cmd/token-auth-proxy/main.go and internal/authn.NewMiddleware, which
-// composes both.
+// mode on: it's true for a JWT-only, a SAML-only, a Basic-only, or any
+// combined config alike. Code that needs to know which mode(s) are
+// actually active must use JWTEnabled/SAMLEnabled/BasicEnabled instead
+// — see cmd/token-auth-proxy/main.go and internal/authn.NewMiddleware,
+// which composes all three.
 func (a InboundAuthConfig) Enabled() bool {
-	return a.JWTEnabled() || a.SAMLEnabled()
+	return a.JWTEnabled() || a.SAMLEnabled() || a.BasicEnabled()
 }
 
 // JWTEnabled reports whether at least one non-Disabled JWT source
@@ -143,6 +163,14 @@ func (a InboundAuthConfig) SAMLEnabled() bool {
 	return a.SAML != nil && !a.SAML.Disabled
 }
 
+// BasicEnabled reports whether the Basic source is configured and not
+// Disabled — i.e. whether username/password verification is being
+// enforced. Narrower than Enabled, symmetric with JWTEnabled and
+// SAMLEnabled.
+func (a InboundAuthConfig) BasicEnabled() bool {
+	return a.Basic != nil && !a.Basic.Disabled
+}
+
 // markUnique records val as seen under label in seen, or returns an
 // error if it was already there. Shared by Validate's name/issuer
 // uniqueness checks (across JWT sources and the single SAML source) so
@@ -156,13 +184,14 @@ func markUnique(seen map[string]bool, label, val string) error {
 	return nil
 }
 
-// Validate validates every JWT source and the SAML source (if any)
-// unconditionally — a source is either well-formed or it isn't,
-// regardless of whether it or any sibling happens to be Disabled right
-// now — then cross-checks that Name/Issuer aren't reused between JWT
-// sources and the SAML source. There's no longer any acs_path/
-// session_cookie uniqueness check to make, since at most one SAML
-// source can ever exist.
+// Validate validates every JWT source, the SAML source and the Basic
+// source (if any) unconditionally — a source is either well-formed or
+// it isn't, regardless of whether it or any sibling happens to be
+// Disabled right now — then cross-checks that Name/Issuer aren't reused
+// between JWT sources and the SAML source. Basic takes no part in those
+// two checks: it has neither a Name nor an Issuer, since there's only
+// ever one of it. There's no acs_path/session_cookie uniqueness check
+// to make either, since at most one SAML source can ever exist.
 func (a *InboundAuthConfig) Validate() error {
 	names := make(map[string]bool, len(a.JWT)+1)
 	issuers := make(map[string]bool, len(a.JWT)+1)
@@ -201,6 +230,34 @@ func (a *InboundAuthConfig) Validate() error {
 			for _, c := range a.JWT[i].Credentials {
 				if c.Location == "cookie" && c.Name == a.SAML.SessionCookie {
 					return fmt.Errorf("inbound.auth.jwt[%d]: credentials cookie %q collides with inbound.auth.saml.session_cookie", i, c.Name)
+				}
+			}
+		}
+	}
+
+	if a.Basic != nil {
+		if err := a.Basic.validate(); err != nil {
+			return fmt.Errorf("inbound.auth.basic: %w", err)
+		}
+
+		// A JWT source reading the Authorization header with no prefix
+		// extracts *whatever* is in it — including a Basic credential,
+		// which it would then reject as a malformed token. The
+		// middleware resolves that at runtime by letting Basic decide
+		// first, but a config where the two legs are reaching for the
+		// same header with no way to tell the schemes apart is a
+		// mistake worth naming here rather than papering over: same
+		// reasoning as the jwt-cookie/saml-session-cookie collision
+		// above.
+		if a.BasicEnabled() {
+			for i := range a.JWT {
+				if a.JWT[i].Disabled {
+					continue
+				}
+				for _, c := range a.JWT[i].Credentials {
+					if c.Location == "header" && strings.EqualFold(c.Name, "Authorization") && c.Prefix == "" {
+						return fmt.Errorf("inbound.auth.jwt[%d]: credentials header %q with no prefix collides with inbound.auth.basic; give it a prefix (e.g. %q)", i, c.Name, "Bearer ")
+					}
 				}
 			}
 		}
@@ -435,6 +492,99 @@ func (s *SAMLSource) validate() error {
 		}
 	}
 
+	return nil
+}
+
+// BasicSource describes the single, optional HTTP Basic authentication
+// source: a fixed list of users, each with a bcrypt password hash, and
+// the realm to advertise when challenging. See InboundAuthConfig's doc
+// comment for why this is one optional value rather than a list, and
+// why it has no Name.
+//
+// Passwords are stored only as bcrypt hashes, never plaintext — a
+// plaintext value is rejected at load time by validate below, not
+// quietly accepted and compared. The hash itself is not a secret (it
+// can't be replayed as a credential), so it's fine directly in YAML;
+// where an operator would still rather have it delivered by their
+// secret-management path, ${env:...}/${file:...} references work here
+// like they do in any other field (see interpolate.go).
+type BasicSource struct {
+	Disabled bool        `yaml:"disabled,omitempty"` // default false; the same "stage it without going live" switch JWT/SAML sources have
+	Realm    string      `yaml:"realm,omitempty"`    // defaults to defaultBasicRealm; user-visible in a browser's login dialog
+	Users    []BasicUser `yaml:"users"`              // required, at least one — a source that could never authenticate anyone is a config error, not a silent deny-all
+}
+
+// BasicUser is one username/bcrypt-hash pair in a BasicSource.
+type BasicUser struct {
+	Username     string `yaml:"username"`
+	PasswordHash string `yaml:"password_hash"`
+}
+
+// applyDefaults fills zero-value fields.
+func (b *BasicSource) applyDefaults() {
+	if b.Realm == "" {
+		b.Realm = defaultBasicRealm
+	}
+}
+
+// validate checks a single BasicSource in isolation. Assumes
+// applyDefaults has already run, so Realm is never empty here.
+//
+// Every password hash is parsed with bcrypt.Cost at load time rather
+// than on the first request that presents a credential: it's what turns
+// "someone pasted a plaintext password into the config" from a
+// permanent, silent 401-for-everyone into an immediate startup failure
+// naming the user — the same fail-closed-at-load-time philosophy as
+// SAMLSource's session-key length check.
+func (b *BasicSource) validate() error {
+	if err := validateRealm(b.Realm); err != nil {
+		return err
+	}
+
+	if len(b.Users) == 0 {
+		return fmt.Errorf("users is required and must list at least one user")
+	}
+
+	seen := make(map[string]bool, len(b.Users))
+	for i, u := range b.Users {
+		if u.Username == "" {
+			return fmt.Errorf("users[%d]: username is required", i)
+		}
+		if seen[u.Username] {
+			return fmt.Errorf("users[%d]: username %q is already used by another user", i, u.Username)
+		}
+		seen[u.Username] = true
+
+		if u.PasswordHash == "" {
+			return fmt.Errorf("users[%d] (%q): password_hash is required", i, u.Username)
+		}
+		if _, err := bcrypt.Cost([]byte(u.PasswordHash)); err != nil {
+			return fmt.Errorf("users[%d] (%q): password_hash is not a bcrypt hash (generate one with `htpasswd -bnBC 12 \"\" 'password'`): %w", i, u.Username, err)
+		}
+	}
+
+	return nil
+}
+
+// validateRealm rejects a realm that can't be expressed in the
+// WWW-Authenticate challenge this proxy builds from it. Go's header
+// writer would sanitize CR/LF on its own, and a quote would merely
+// produce a malformed challenge rather than a header injection — but
+// catching it at load time, where the operator can see it, beats
+// shipping a subtly broken challenge that only some clients complain
+// about.
+func validateRealm(realm string) error {
+	if realm == "" {
+		return fmt.Errorf("realm must not be empty")
+	}
+	if strings.ContainsAny(realm, "\"\\") {
+		return fmt.Errorf("realm %q must not contain a quote or backslash", realm)
+	}
+	for _, r := range realm {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("realm %q must not contain control characters", realm)
+		}
+	}
 	return nil
 }
 

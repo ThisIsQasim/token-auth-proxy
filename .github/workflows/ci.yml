@@ -100,46 +100,62 @@ jobs:
           go test -tags=load -race -timeout=120s -json ./test/load/... | tee test-results.json
       # The load test is a single pass/fail test per scenario (no
       # subtests), so dorny/test-reporter's Check below only ever says
-      # "2 passed" — correct, but tells you nothing about the numbers
+      # "3 passed" — correct, but tells you nothing about the numbers
       # that actually matter for a load test (throughput, latency
-      # percentiles, resource usage — and, since baseline and jwt-auth
-      # both run, the overhead auth adds), which otherwise only exist
-      # inside the load-test-report-*.json artifacts someone has to
-      # download and open by hand. Render both side by side as one
-      # table (not two separate ones — that's the whole point of
-      # running both: a directly comparable delta, not two numbers to
-      # cross-reference by hand) straight into this job's own Summary
-      # tab — jq ships preinstalled on GitHub-hosted runners. Filenames
-      # are hardcoded, not globbed: they're a direct, known consequence
-      # of the two reportName values in proxy_load_test.go, and hardcoding
-      # avoids depending on glob ordering to know which column is which.
+      # percentiles, resource usage — and, since baseline and both auth
+      # scenarios run, the overhead each auth mode adds), which
+      # otherwise only exist inside the load-test-report-*.json
+      # artifacts someone has to download and open by hand. Render them
+      # side by side as one table (not one per scenario — that's the
+      # whole point of running all three: directly comparable deltas,
+      # not numbers to cross-reference by hand) straight into this job's
+      # own Summary tab — jq ships preinstalled on GitHub-hosted
+      # runners. Filenames are hardcoded, not globbed: they're a direct,
+      # known consequence of the reportName values in
+      # proxy_load_test.go, and hardcoding avoids depending on glob
+      # ordering to know which column is which.
       - name: Summarize load test report
         if: always()
         run: |
-          noauth=load-test-report-baseline.json
-          auth=load-test-report-jwt-auth.json
-          if [ ! -f "$noauth" ] || [ ! -f "$auth" ]; then
+          reports="load-test-report-baseline.json load-test-report-jwt-auth.json load-test-report-basic-auth.json"
+
+          missing=""
+          for f in $reports; do
+            [ -f "$f" ] || missing="$missing $f"
+          done
+          if [ -n "$missing" ]; then
             {
               echo "## Load Test Report"
               echo ""
-              echo "_One or both reports missing — a scenario likely failed before its attack run completed._"
+              echo "_Missing report(s):$missing — that scenario likely failed before its attack run completed._"
             } >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
+
           # Column headers come from each report's own .name field
-          # (proxy_load_test.go's reportName, "baseline"/"jwt-auth")
-          # rather than being hardcoded here, so this stays in sync
-          # automatically if those scenario names ever change.
-          noauth_name=$(jq -r '.name' "$noauth")
-          auth_name=$(jq -r '.name' "$auth")
-          row() { # row <label> <jq filter, applied to both files>
-            printf '| %s | %s | %s |\n' "$1" "$(jq -r "$2" "$noauth")" "$(jq -r "$2" "$auth")"
+          # (proxy_load_test.go's reportName) rather than being
+          # hardcoded here, so this stays in sync automatically if those
+          # scenario names ever change.
+          header="| Metric"
+          divider="|---"
+          for f in $reports; do
+            header="$header | $(jq -r '.name' "$f")"
+            divider="$divider|---"
+          done
+
+          row() { # row <label> <jq filter, applied to every report>
+            line="| $1"
+            for f in $reports; do
+              line="$line | $(jq -r "$2" "$f")"
+            done
+            printf '%s |\n' "$line"
           }
+
           {
             echo "## Load Test Report"
             echo ""
-            echo "| Metric | $noauth_name | $auth_name |"
-            echo "|---|---|---|"
+            echo "$header |"
+            echo "$divider|"
             row "Requests" '.requests'
             row "Success rate" '((.success * 100) | round | tostring) + "%"'
             row "Throughput" '((.throughput_rps | round | tostring) + " req/s")'
@@ -152,17 +168,17 @@ jobs:
             row "Peak RSS" '((.resources.peak_rss_bytes / 1048576 | round | tostring) + " MB")'
             row "Avg RSS" '((.resources.avg_rss_bytes / 1048576 | round | tostring) + " MB")'
             echo ""
-            echo "Status codes — $noauth_name: \`$(jq -c '.status_codes' "$noauth")\`, $auth_name: \`$(jq -c '.status_codes' "$auth")\`"
-            noauth_errors=$(jq -c '.errors // []' "$noauth")
-            auth_errors=$(jq -c '.errors // []' "$auth")
-            if [ "$noauth_errors" != "[]" ] && [ "$noauth_errors" != "null" ]; then
+            for f in $reports; do
+              echo "Status codes — $(jq -r '.name' "$f"): \`$(jq -c '.status_codes' "$f")\`"
               echo ""
-              echo "**$noauth_name errors:** \`$noauth_errors\`"
-            fi
-            if [ "$auth_errors" != "[]" ] && [ "$auth_errors" != "null" ]; then
-              echo ""
-              echo "**$auth_name errors:** \`$auth_errors\`"
-            fi
+            done
+            for f in $reports; do
+              errors=$(jq -c '.errors // []' "$f")
+              if [ "$errors" != "[]" ] && [ "$errors" != "null" ]; then
+                echo "**$(jq -r '.name' "$f") errors:** \`$errors\`"
+                echo ""
+              fi
+            done
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Publish test results
         if: always()

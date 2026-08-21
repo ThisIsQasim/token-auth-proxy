@@ -92,7 +92,16 @@ func TestSAMLSessionCodec_Tampered(t *testing.T) {
 	encoded, err := codec.Encode(session)
 	require.NoError(t, err)
 
-	tampered := encoded[:len(encoded)-1] + "x"
+	// Replace the final character with one it definitely isn't:
+	// substituting a fixed byte is a no-op whenever the signature
+	// already ends in that byte (about one run in sixty-four, given
+	// base64url's alphabet), which would hand Decode an untampered
+	// token and fail this test for the wrong reason.
+	replacement := byte('x')
+	if encoded[len(encoded)-1] == replacement {
+		replacement = 'y'
+	}
+	tampered := encoded[:len(encoded)-1] + string(replacement)
 	_, err = codec.Decode(tampered)
 	require.Error(t, err)
 }

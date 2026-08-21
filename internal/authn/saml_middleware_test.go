@@ -220,7 +220,7 @@ func TestRejectUnavailable(t *testing.T) {
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/protected", nil)
 	rr := httptest.NewRecorder()
 
-	rejectUnavailable(rr, testLogger(), req, assert.AnError, 30*time.Second)
+	rejectUnavailable(rr, testLogger(), req, reasonSAMLMetadataUnavailable, assert.AnError, 30*time.Second)
 
 	assert.Equal(t, http.StatusServiceUnavailable, rr.Code)
 	assert.Equal(t, "30", rr.Header().Get("Retry-After"))
@@ -240,7 +240,7 @@ func TestRejectUnavailable_RecordsRejectionMetric(t *testing.T) {
 	before := rejectionCountByReason(t, reasonSAMLMetadataUnavailable)
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/protected", nil)
-	rejectUnavailable(httptest.NewRecorder(), testLogger(), req, assert.AnError, 30*time.Second)
+	rejectUnavailable(httptest.NewRecorder(), testLogger(), req, reasonSAMLMetadataUnavailable, assert.AnError, 30*time.Second)
 
 	assert.Equal(t, before+1, rejectionCountByReason(t, reasonSAMLMetadataUnavailable))
 }

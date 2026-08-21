@@ -7,26 +7,34 @@
 // backends, and records both request latency (via vegeta) and the proxy
 // process's own CPU/memory usage (via gopsutil) for the run.
 //
-// Two scenarios run back to back, sharing the same core attack logic:
-// "baseline" (no inbound.auth at all) and "jwt-auth" (a real JWT source
-// enabled, a real signed bearer token attached to every request). Kept
-// side by side deliberately, not replaced one-for-the-other: baseline
-// alone would never measure the per-request verification cost that's
-// the whole reason this proxy exists, but jwt-auth alone would lose the
+// Three scenarios run back to back, sharing the same core attack logic:
+// "baseline" (no inbound.auth at all), "jwt-auth" (a real JWT source
+// enabled, a real signed bearer token attached to every request), and
+// "basic-auth" (a bcrypt-hashed user at the default cost, the same
+// credential attached to every request). Kept side by side
+// deliberately, not replaced one-for-the-other: baseline alone would
+// never measure the per-request verification cost that's the whole
+// reason this proxy exists, but an auth scenario alone would lose the
 // ability to see that cost as a delta against an unauthenticated
-// pass-through. jwt-auth additionally exercises Registry.Reconcile/
-// Keyfunc under the same sustained concurrent-request-plus-concurrent-
-// reload conditions the target swap itself is already tested under.
+// pass-through. The auth scenarios additionally exercise each
+// registry's Reconcile under the same sustained concurrent-request-
+// plus-concurrent-reload conditions the target swap itself is already
+// tested under — and basic-auth is the only place BasicRegistry's
+// verified-credential cache is proven to actually hold the line, since
+// an uncached bcrypt compare per request could not survive attackRate
+// at all.
 //
 // Run via `make test-load` or `go test -tags=load ./test/load/...`. Set
 // LOAD_TEST_REPORT_PATH to have each scenario's metrics written out as
-// JSON (suffixed with the scenario name, e.g. `-baseline`/`-jwt-auth`,
-// so the two don't overwrite each other) — CI uploads these as a build
-// artifact so results are inspectable after the fact, not just pass/fail.
+// JSON (suffixed with the scenario name, e.g. `-baseline`/`-jwt-auth`/
+// `-basic-auth`, so they don't overwrite each other) — CI uploads these
+// as a build artifact so results are inspectable after the fact, not
+// just pass/fail.
 package load
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -41,6 +49,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	vegeta "github.com/tsenart/vegeta/v12/lib"
+	"golang.org/x/crypto/bcrypt"
 
 	"github.com/ThisIsQasim/token-auth-proxy/test/testutil"
 )
@@ -148,10 +157,9 @@ type latencyReport struct {
 
 // writeReport writes r's JSON to LOAD_TEST_REPORT_PATH (defaulting to
 // "load-test-report.json"), suffixed with r.Name before the extension —
-// e.g. "load-test-report-baseline.json" — so the baseline and jwt-auth
-// scenarios in the same run don't overwrite each other's file, even
-// though CI sets one shared LOAD_TEST_REPORT_PATH for the whole
-// package.
+// e.g. "load-test-report-baseline.json" — so the scenarios in one run
+// don't overwrite each other's file, even though CI sets one shared
+// LOAD_TEST_REPORT_PATH for the whole package.
 func writeReport(tb testing.TB, r latencyReport) {
 	tb.Helper()
 	path := os.Getenv("LOAD_TEST_REPORT_PATH")
@@ -176,14 +184,19 @@ func writeReport(tb testing.TB, r latencyReport) {
 	tb.Logf("wrote load test report to %s", path)
 }
 
-// authScenario optionally attaches JWT bearer-token auth to a
-// runHotReloadLoadTest run. A nil *authScenario means the proxy runs
-// with no inbound.auth at all — both configYAML and header are safe to
-// call on a nil receiver, checking explicitly rather than requiring
-// every call site to branch on nilness itself.
+// authScenario optionally attaches an inbound.auth configuration, and
+// the credential that satisfies it, to a runHotReloadLoadTest run. A
+// nil *authScenario means the proxy runs with no inbound.auth at all —
+// both configYAML and header are safe to call on a nil receiver,
+// checking explicitly rather than requiring every call site to branch
+// on nilness itself.
+//
+// authYAML is the whole inbound: block, so a scenario only has to say
+// what its own auth mode looks like; the surrounding config (and the
+// target that gets flipped underneath it) is shared.
 type authScenario struct {
-	idp   *testutil.TestIDP
-	token string
+	authYAML string
+	hdr      http.Header
 }
 
 // newJWTAuthScenario starts a real JWKS server and signs one token,
@@ -197,30 +210,56 @@ func newJWTAuthScenario(t *testing.T) *authScenario {
 		Issuer:    idp.Issuer,
 		ExpiresAt: jwt.NewNumericDate(time.Now().Add(attackDuration + time.Minute)),
 	})
-	return &authScenario{idp: idp, token: token}
+	return &authScenario{
+		authYAML: fmt.Sprintf(`inbound:
+  auth:
+    jwt:
+      - name: idp
+        issuer: %q
+        jwks_url: %q
+`, idp.Issuer, idp.JWKSURL),
+		hdr: http.Header{"Authorization": []string{"Bearer " + token}},
+	}
+}
+
+// newBasicAuthScenario configures Basic auth with a hash at bcrypt's
+// default cost — a realistic production setting, and one that would
+// make this scenario fail outright without BasicRegistry's verified
+// credential cache: a compare at that cost takes tens of milliseconds
+// of CPU, so paying it per request at attackRate would blow both
+// minSuccessRate and maxP99Latency. Every request here presents the
+// same credential, exactly as a real client would, so what's measured
+// is the steady-state cached path.
+func newBasicAuthScenario(t *testing.T) *authScenario {
+	hash, err := bcrypt.GenerateFromPassword([]byte("hunter2"), bcrypt.DefaultCost)
+	require.NoError(t, err)
+
+	credential := base64.StdEncoding.EncodeToString([]byte("alice:hunter2"))
+	return &authScenario{
+		authYAML: fmt.Sprintf(`inbound:
+  auth:
+    basic:
+      realm: "load"
+      users:
+        - username: alice
+          password_hash: %q
+`, string(hash)),
+		hdr: http.Header{"Authorization": []string{"Basic " + credential}},
+	}
 }
 
 func (a *authScenario) configYAML(listenAddr, target string) string {
 	if a == nil {
 		return testutil.ConfigYAML(listenAddr, target)
 	}
-	return fmt.Sprintf(`
-listen_addr: %q
-target: %q
-inbound:
-  auth:
-    jwt:
-      - name: idp
-        issuer: %q
-        jwks_url: %q
-`, listenAddr, target, a.idp.Issuer, a.idp.JWKSURL)
+	return fmt.Sprintf("\nlisten_addr: %q\ntarget: %q\n%s", listenAddr, target, a.authYAML)
 }
 
 func (a *authScenario) header() http.Header {
 	if a == nil {
 		return nil
 	}
-	return http.Header{"Authorization": []string{"Bearer " + a.token}}
+	return a.hdr
 }
 
 // runHotReloadLoadTest is the shared core of both scenarios below: it
@@ -318,4 +357,8 @@ func TestLoad_HotReloadUnderTraffic_Baseline(t *testing.T) {
 
 func TestLoad_HotReloadUnderTraffic_JWTAuth(t *testing.T) {
 	runHotReloadLoadTest(t, "jwt-auth", newJWTAuthScenario(t))
+}
+
+func TestLoad_HotReloadUnderTraffic_BasicAuth(t *testing.T) {
+	runHotReloadLoadTest(t, "basic-auth", newBasicAuthScenario(t))
 }

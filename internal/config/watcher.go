@@ -221,7 +221,8 @@ func (w *Watcher) reload() {
 			"target", next.Target,
 			"auth_enabled", next.Inbound.Auth.Enabled(),
 			"jwt_sources", len(next.Inbound.Auth.JWT),
-			"saml_configured", next.Inbound.Auth.SAML != nil)
+			"saml_configured", next.Inbound.Auth.SAML != nil,
+			"basic_configured", next.Inbound.Auth.Basic != nil)
 	}
 }
 
@@ -235,7 +236,9 @@ func (w *Watcher) reload() {
 // below, alongside the warning check above) or it hot-reloads and this
 // already detects it changing. reflect.DeepEqual is required (not !=)
 // since Config contains slice/pointer fields (Inbound.Auth.JWT,
-// Inbound.Auth.SAML), which aren't comparable with ==.
+// Inbound.Auth.SAML, Inbound.Auth.Basic), which aren't comparable with
+// == — and which DeepEqual follows through, so a change *inside* one of
+// them counts as changed, not just a swapped pointer.
 func hotReloadableFieldsChanged(prev, next *Config) bool {
 	p, n := *prev, *next
 	p.ListenAddr, n.ListenAddr = "", ""

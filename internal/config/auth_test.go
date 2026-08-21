@@ -14,6 +14,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // validJWTSource returns a fresh, already-defaulted, valid JWTSource,
@@ -604,4 +605,163 @@ func TestInboundAuthConfig_JWTSourceByIssuer(t *testing.T) {
 
 	_, ok = a.JWTSourceByIssuer("https://disabled.example.com")
 	assert.False(t, ok, "a disabled source's issuer must not be found")
+}
+
+// testBasicHash is cached per process for the same reason testSPRSAKey
+// is: bcrypt at a realistic cost is deliberately slow, and every basic
+// test case wants a valid hash. MinCost keeps the tests fast — the cost
+// factor is the operator's choice, and nothing under test depends on it.
+var testBasicHash = sync.OnceValues(func() (string, error) {
+	h, err := bcrypt.GenerateFromPassword([]byte("hunter2"), bcrypt.MinCost)
+	return string(h), err
+})
+
+// validBasicSource returns a fresh, already-defaulted, valid
+// BasicSource, so each test only needs to mutate the field it cares
+// about.
+func validBasicSource(t *testing.T) BasicSource {
+	t.Helper()
+	hash, err := testBasicHash()
+	require.NoError(t, err)
+	b := BasicSource{Users: []BasicUser{{Username: "alice", PasswordHash: hash}}}
+	b.applyDefaults()
+	return b
+}
+
+func TestBasicSource_ApplyDefaults(t *testing.T) {
+	var b BasicSource
+	b.applyDefaults()
+	assert.Equal(t, defaultBasicRealm, b.Realm)
+
+	b = BasicSource{Realm: "internal tools"}
+	b.applyDefaults()
+	assert.Equal(t, "internal tools", b.Realm)
+}
+
+func TestBasicSource_Validate(t *testing.T) {
+	tests := []struct {
+		name      string
+		mutate    func(b *BasicSource)
+		wantErr   bool
+		errSubstr string
+	}{
+		{name: "valid"},
+		{
+			name:      "no users",
+			mutate:    func(b *BasicSource) { b.Users = nil },
+			wantErr:   true,
+			errSubstr: "at least one user",
+		},
+		{
+			name:      "empty username",
+			mutate:    func(b *BasicSource) { b.Users[0].Username = "" },
+			wantErr:   true,
+			errSubstr: "username is required",
+		},
+		{
+			name: "duplicate username",
+			mutate: func(b *BasicSource) {
+				b.Users = append(b.Users, b.Users[0])
+			},
+			wantErr:   true,
+			errSubstr: "already used by another user",
+		},
+		{
+			name:      "missing password hash",
+			mutate:    func(b *BasicSource) { b.Users[0].PasswordHash = "" },
+			wantErr:   true,
+			errSubstr: "password_hash is required",
+		},
+		{
+			name:      "plaintext password rejected",
+			mutate:    func(b *BasicSource) { b.Users[0].PasswordHash = "hunter2" },
+			wantErr:   true,
+			errSubstr: "not a bcrypt hash",
+		},
+		{
+			name:      "truncated hash rejected",
+			mutate:    func(b *BasicSource) { b.Users[0].PasswordHash = "$2y$12$tooshort" },
+			wantErr:   true,
+			errSubstr: "not a bcrypt hash",
+		},
+		{
+			name:      "realm with a quote rejected",
+			mutate:    func(b *BasicSource) { b.Realm = `say "hi"` },
+			wantErr:   true,
+			errSubstr: "quote or backslash",
+		},
+		{
+			name:      "realm with a newline rejected",
+			mutate:    func(b *BasicSource) { b.Realm = "one\ntwo" },
+			wantErr:   true,
+			errSubstr: "control characters",
+		},
+		{
+			name:      "empty realm rejected",
+			mutate:    func(b *BasicSource) { b.Realm = "" },
+			wantErr:   true,
+			errSubstr: "must not be empty",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := validBasicSource(t)
+			if tt.mutate != nil {
+				tt.mutate(&b)
+			}
+
+			err := b.validate()
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.ErrorContains(t, err, tt.errSubstr)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestInboundAuthConfig_BasicEnabled(t *testing.T) {
+	b := validBasicSource(t)
+
+	var none InboundAuthConfig
+	assert.False(t, none.BasicEnabled())
+	assert.False(t, none.Enabled())
+
+	live := InboundAuthConfig{Basic: &b}
+	assert.True(t, live.BasicEnabled())
+	assert.True(t, live.Enabled())
+	assert.False(t, live.JWTEnabled())
+	assert.False(t, live.SAMLEnabled())
+
+	disabled := b
+	disabled.Disabled = true
+	staged := InboundAuthConfig{Basic: &disabled}
+	assert.False(t, staged.BasicEnabled())
+	assert.False(t, staged.Enabled())
+}
+
+func TestInboundAuthConfig_Validate_BasicCollidesWithPrefixlessJWTHeader(t *testing.T) {
+	b := validBasicSource(t)
+	j := validJWTSource()
+	j.Credentials = []CredentialLocation{{Location: "header", Name: "Authorization"}}
+
+	a := InboundAuthConfig{JWT: []JWTSource{j}, Basic: &b}
+	err := a.Validate()
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "collides with inbound.auth.basic")
+
+	// The default "Bearer " prefix tells the two schemes apart, so the
+	// same pair is fine.
+	j.Credentials = []CredentialLocation{{Location: "header", Name: "Authorization", Prefix: "Bearer "}}
+	a = InboundAuthConfig{JWT: []JWTSource{j}, Basic: &b}
+	require.NoError(t, a.Validate())
+
+	// A disabled basic source can't collide with anything.
+	disabled := b
+	disabled.Disabled = true
+	j.Credentials = []CredentialLocation{{Location: "header", Name: "Authorization"}}
+	a = InboundAuthConfig{JWT: []JWTSource{j}, Basic: &disabled}
+	require.NoError(t, a.Validate())
 }

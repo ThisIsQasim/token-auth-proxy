@@ -6,9 +6,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/knadh/koanf/parsers/yaml"
 	env "github.com/knadh/koanf/providers/env/v2"
-	"github.com/knadh/koanf/providers/file"
 	"github.com/knadh/koanf/providers/posflag"
 	"github.com/knadh/koanf/v2"
 	"github.com/spf13/pflag"
@@ -68,14 +66,14 @@ func init() {
 
 // jsonFieldSpec describes one inbound.auth field overridable via a
 // JSON-valued flag/env var — a JSON array for inbound.auth.jwt (a
-// list), a JSON object for inbound.auth.saml (a single optional
-// source). koanf's flat-key env/flag providers have no way to express
-// either shape (see loadJSONFieldOverrides' doc comment for why), so
-// these two fields are deliberately kept out of
+// list), a JSON object for inbound.auth.saml and inbound.auth.basic
+// (each a single optional source). koanf's flat-key env/flag providers
+// have no way to express either shape (see loadJSONFieldOverrides' doc
+// comment for why), so these fields are deliberately kept out of
 // fieldSpecs/envToKey/flagToKey — that table assumes every entry is a
 // flat scalar the generic env/posflag providers can decode identically,
 // which doesn't hold here. Being absent from those maps also means the
-// generic providers' callbacks (envKey/flagKey) simply ignore these two
+// generic providers' callbacks (envKey/flagKey) simply ignore these
 // flags/env vars on their own, since an unrecognized name maps to "" and
 // both providers skip empty keys.
 type jsonFieldSpec struct {
@@ -90,6 +88,8 @@ var jsonFieldSpecs = []jsonFieldSpec{
 		usage: "JSON array fully replacing inbound.auth.jwt (env TAP_INBOUND_AUTH_JWT_JSON)"},
 	{koanfKey: "inbound.auth.saml", flagName: "inbound-auth-saml-json", envName: "INBOUND_AUTH_SAML_JSON",
 		usage: "JSON object fully replacing inbound.auth.saml (env TAP_INBOUND_AUTH_SAML_JSON)"},
+	{koanfKey: "inbound.auth.basic", flagName: "inbound-auth-basic-json", envName: "INBOUND_AUTH_BASIC_JSON",
+		usage: "JSON object fully replacing inbound.auth.basic (env TAP_INBOUND_AUTH_BASIC_JSON)"},
 }
 
 // RegisterFlags registers every recognized flag on fs with a zero-value
@@ -219,7 +219,7 @@ func decodeJSONValue(spec jsonFieldSpec, raw string) (any, error) {
 // TransformFunc and posflag's callback each return one scalar value per
 // key, and even koanf's own delimiter-based key nesting
 // (maps.Unflatten) only ever builds nested maps, never slices — so
-// these two fields are handled here instead, entirely outside the
+// these fields are handled here instead, entirely outside the
 // generic env/flag mechanism, by parsing JSON and injecting the result
 // as an already-shaped value via k.Set. A value here fully replaces
 // whatever the file layer set for that key, the same "override wins
@@ -250,10 +250,14 @@ func loadJSONFieldOverrides(k *koanf.Koanf, fs *pflag.FlagSet) error {
 // makes a CLI/env override keep winning across every hot-reload, not
 // just the first one. fs may be nil, meaning no override layer at all
 // (a plain file load).
+//
+// The file layer is read through newInterpolatingProvider, so every
+// ${env:...}/${file:...} reference in it is resolved here — and, since
+// this function is also the reload path, re-resolved on every reload.
 func loadLayered(path string, fs *pflag.FlagSet) (*Config, error) {
 	k := koanf.New(".")
 	if path != "" {
-		if err := k.Load(file.Provider(path), yaml.Parser()); err != nil {
+		if err := k.Load(newInterpolatingProvider(path), nil); err != nil {
 			return nil, fmt.Errorf("read config: %w", err)
 		}
 	}

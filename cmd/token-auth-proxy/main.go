@@ -111,6 +111,12 @@ func run() error {
 	if cfg.Inbound.Auth.JWTEnabled() {
 		logger.Info("jwt verification enabled", "jwt_sources", len(cfg.Inbound.Auth.JWT))
 	}
+	if cfg.Inbound.Auth.BasicEnabled() {
+		basicSrc := cfg.Inbound.Auth.Basic
+		logger.Info("basic auth enabled",
+			"realm", basicSrc.Realm,
+			"users", len(basicSrc.Users))
+	}
 	if cfg.Inbound.Auth.SAMLEnabled() {
 		samlSrc := cfg.Inbound.Auth.SAML
 		logger.Info("saml sp login enabled",
@@ -134,13 +140,15 @@ func run() error {
 	samlRegistry := authn.NewSAMLRegistry(logger)
 	// Deferred here (not earlier/later) so both fire after srv.Shutdown
 	// below returns — in-flight requests during graceful shutdown can
-	// still verify against a live resolver/provider.
+	// still verify against a live resolver/provider. The basic registry
+	// owns no goroutine or client, so it has nothing to close.
 	defer authRegistry.Close()
 	defer samlRegistry.Close()
+	basicRegistry := authn.NewBasicRegistry(logger)
 
 	transport := proxy.BuildTransport(cfg)
 	rp := proxy.New(source, logger, transport)
-	requireAuth := authn.NewMiddleware(source, authRegistry, samlRegistry, logger)
+	requireAuth := authn.NewMiddleware(source, authRegistry, samlRegistry, basicRegistry, logger)
 
 	mux := http.NewServeMux()
 	mux.Handle("/healthz", proxy.HealthzHandler())   // deliberately unauthenticated

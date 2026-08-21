@@ -73,6 +73,54 @@ func (b *backendStub) Handler() http.Handler {
 
 func (b *backendStub) Hits() int { return int(b.hits.Load()) }
 
+// backendBody is what backendStub answers with. Every assertion below
+// checks it rather than the status alone: a bare 200 proves only that
+// *something* answered, and a bare 401 proves only that something
+// refused — neither says whether the response the client actually got
+// came from the backend or from the proxy. Since deciding that is the
+// entire job of this middleware, every test states which one it
+// expected.
+const backendBody = "ok"
+
+// assertProxied asserts the request reached the backend wantHits times
+// and that the backend's own response came back to the client
+// unchanged.
+func assertProxied(t *testing.T, rec *httptest.ResponseRecorder, backend *backendStub, wantHits int) {
+	t.Helper()
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, wantHits, backend.Hits())
+	assert.Equal(t, backendBody, rec.Body.String(), "the backend's own response must reach the client unchanged")
+}
+
+// assertNotProxied asserts this request didn't reach the backend —
+// wantHits is the running total for the test, which is 0 in all but the
+// few tests that make an allowed request first — and that whatever the
+// client got back didn't come from the backend either.
+func assertNotProxied(t *testing.T, rec *httptest.ResponseRecorder, backend *backendStub, wantHits int) {
+	t.Helper()
+	assert.Equal(t, wantHits, backend.Hits(), "backend must not be reached")
+	assert.NotEqual(t, backendBody, rec.Body.String(), "the client must not receive the backend's response")
+}
+
+// assertRejected is assertNotProxied plus the proxy's own status and
+// body — spelled out to pin the "never explain why" rule from reason's
+// doc comment in authn.go.
+func assertRejected(t *testing.T, rec *httptest.ResponseRecorder, backend *backendStub, wantHits, wantStatus int, wantBody string) {
+	t.Helper()
+	assert.Equal(t, wantStatus, rec.Code)
+	assert.Equal(t, wantBody, rec.Body.String())
+	assertNotProxied(t, rec, backend, wantHits)
+}
+
+// assertRedirected asserts the request was sent to the IdP instead of
+// the backend. Unlike assertRejected the body isn't a fixed string
+// (samlsp writes its own), so only assertNotProxied's check applies.
+func assertRedirected(t *testing.T, rec *httptest.ResponseRecorder, backend *backendStub, wantHits int) {
+	t.Helper()
+	assert.Equal(t, http.StatusFound, rec.Code)
+	assertNotProxied(t, rec, backend, wantHits)
+}
+
 // jwtSourceFor builds a JWTSource trusting idp, with Algorithms and
 // Credentials set explicitly to what JWTSource.applyDefaults would
 // have produced — fakeSource.set doesn't call applyDefaults (see its
@@ -87,17 +135,17 @@ func jwtSourceFor(idp *TestIDP) config.JWTSource {
 	}
 }
 
-// newTestMiddleware wires NewMiddleware with a fresh SAMLRegistry —
-// most tests in this file only care about the JWT leg, so this avoids
-// repeating the SAMLRegistry construction/cleanup boilerplate at every
-// call site. Tests exercising the SAML leg or the composition between
-// the two build their own instead (see TestMiddleware_SAMLOnly_* and
-// TestMiddleware_Composition_*).
+// newTestMiddleware wires NewMiddleware with a fresh SAMLRegistry and
+// BasicRegistry — most tests in this file only care about the JWT leg,
+// so this avoids repeating that construction/cleanup boilerplate at
+// every call site. Tests exercising the SAML leg or the composition
+// between legs build their own instead (see TestMiddleware_SAMLOnly_*
+// and TestMiddleware_Composition_*).
 func newTestMiddleware(t *testing.T, source ConfigSource, reg *Registry) func(http.Handler) http.Handler {
 	t.Helper()
 	samlReg := NewSAMLRegistry(testLogger())
 	t.Cleanup(samlReg.Close)
-	return NewMiddleware(source, reg, samlReg, testLogger())
+	return NewMiddleware(source, reg, samlReg, NewBasicRegistry(testLogger()), testLogger())
 }
 
 func bearerRequest(t *testing.T, token string) *http.Request {
@@ -151,8 +199,7 @@ func TestMiddleware_SAMLOnly_UnauthenticatedRedirects(t *testing.T) {
 	rec := httptest.NewRecorder()
 	mw(backend.Handler()).ServeHTTP(rec, bearerRequest(t, ""))
 
-	assert.Equal(t, http.StatusFound, rec.Code, "a SAML-only config must redirect an unauthenticated request to the IdP, not pass it through")
-	assert.Equal(t, 0, backend.Hits())
+	assertRedirected(t, rec, backend, 0)
 }
 
 func TestMiddleware_NoAuthConfigured_PassesThrough(t *testing.T) {
@@ -165,8 +212,7 @@ func TestMiddleware_NoAuthConfigured_PassesThrough(t *testing.T) {
 	rec := httptest.NewRecorder()
 	mw(backend.Handler()).ServeHTTP(rec, bearerRequest(t, ""))
 
-	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.Equal(t, 1, backend.Hits())
+	assertProxied(t, rec, backend, 1)
 }
 
 func TestMiddleware_AllJWTSourcesDisabled_PassesThrough(t *testing.T) {
@@ -183,8 +229,7 @@ func TestMiddleware_AllJWTSourcesDisabled_PassesThrough(t *testing.T) {
 	rec := httptest.NewRecorder()
 	mw(backend.Handler()).ServeHTTP(rec, bearerRequest(t, ""))
 
-	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.Equal(t, 1, backend.Hits())
+	assertProxied(t, rec, backend, 1)
 }
 
 func TestMiddleware_ValidToken_ForwardedUnmodified(t *testing.T) {
@@ -202,8 +247,7 @@ func TestMiddleware_ValidToken_ForwardedUnmodified(t *testing.T) {
 	rec := httptest.NewRecorder()
 	mw(backend.Handler()).ServeHTTP(rec, bearerRequest(t, token))
 
-	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.Equal(t, 1, backend.Hits())
+	assertProxied(t, rec, backend, 1)
 	assert.Equal(t, "Bearer "+token, backend.lastAuthValue.Load())
 }
 
@@ -220,9 +264,8 @@ func TestMiddleware_MissingToken_Rejected(t *testing.T) {
 	rec := httptest.NewRecorder()
 	mw(backend.Handler()).ServeHTTP(rec, bearerRequest(t, ""))
 
-	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 	assert.Equal(t, "Bearer", rec.Header().Get("WWW-Authenticate"))
-	assert.Equal(t, 0, backend.Hits(), "backend must never be reached on rejection")
+	assertRejected(t, rec, backend, 0, http.StatusUnauthorized, "unauthorized")
 }
 
 func TestMiddleware_BadToken_Rejected(t *testing.T) {
@@ -238,9 +281,8 @@ func TestMiddleware_BadToken_Rejected(t *testing.T) {
 	rec := httptest.NewRecorder()
 	mw(backend.Handler()).ServeHTTP(rec, bearerRequest(t, "not-a-valid-jwt"))
 
-	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 	assert.Equal(t, `Bearer error="invalid_token"`, rec.Header().Get("WWW-Authenticate"))
-	assert.Equal(t, 0, backend.Hits())
+	assertRejected(t, rec, backend, 0, http.StatusUnauthorized, "unauthorized")
 }
 
 func TestMiddleware_UnknownIssuer_Rejected(t *testing.T) {
@@ -259,8 +301,7 @@ func TestMiddleware_UnknownIssuer_Rejected(t *testing.T) {
 	rec := httptest.NewRecorder()
 	mw(backend.Handler()).ServeHTTP(rec, bearerRequest(t, token))
 
-	assert.Equal(t, http.StatusUnauthorized, rec.Code)
-	assert.Equal(t, 0, backend.Hits())
+	assertRejected(t, rec, backend, 0, http.StatusUnauthorized, "unauthorized")
 }
 
 func TestMiddleware_MuxWiring_HealthzStaysUnauthenticated(t *testing.T) {
@@ -370,8 +411,7 @@ func TestMiddleware_Composition_ValidJWT_ForwardsWithoutConsultingSAML(t *testin
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, bearerRequest(t, token))
 
-	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.Equal(t, 1, backend.Hits())
+	assertProxied(t, rec, backend, 1)
 	assert.Empty(t, rec.Result().Cookies(), "a valid bearer token must never involve the SAML leg at all")
 }
 
@@ -381,9 +421,8 @@ func TestMiddleware_Composition_BadJWT_RejectsWithoutFallingThroughToSAML(t *tes
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, bearerRequest(t, "not-a-valid-jwt"))
 
-	assert.Equal(t, http.StatusUnauthorized, rec.Code, "a presented-but-invalid bearer token must be JWT's final answer, not redirected to SAML")
-	assert.Equal(t, 0, backend.Hits())
-	assert.Empty(t, rec.Result().Cookies())
+	assertRejected(t, rec, backend, 0, http.StatusUnauthorized, "unauthorized")
+	assert.Empty(t, rec.Result().Cookies(), "a presented-but-invalid bearer token must be JWT's final answer, not redirected to SAML")
 }
 
 func TestMiddleware_Composition_NoCredential_FallsThroughToSAMLRedirect(t *testing.T) {
@@ -392,8 +431,7 @@ func TestMiddleware_Composition_NoCredential_FallsThroughToSAMLRedirect(t *testi
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, bearerRequest(t, ""))
 
-	assert.Equal(t, http.StatusFound, rec.Code, "a genuinely credential-less request must fall through to SAML's redirect, not JWT's 401")
-	assert.Equal(t, 0, backend.Hits())
+	assertRedirected(t, rec, backend, 0) // a genuinely credential-less request falls through to SAML, not JWT's 401
 }
 
 func TestMiddleware_Composition_ValidSAMLSession_Forwards(t *testing.T) {
@@ -426,8 +464,7 @@ func TestMiddleware_Composition_ValidSAMLSession_Forwards(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, protectedReq)
 
-	assert.Equal(t, http.StatusOK, rec.Code, "a valid saml session must forward, with no bearer token presented")
-	assert.Equal(t, 1, backend.Hits())
+	assertProxied(t, rec, backend, 1) // a valid saml session forwards, with no bearer token presented
 }
 
 func TestMiddleware_Composition_ACSPath_NeverIntercepted(t *testing.T) {
@@ -469,7 +506,210 @@ func TestMiddleware_Composition_SAMLMetadataUnavailable_ServiceUnavailable(t *te
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, bearerRequest(t, "")) // no credential -> falls through to the (unreachable) SAML leg
 
-	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 	assert.NotEmpty(t, rec.Header().Get("Retry-After"))
-	assert.Equal(t, 0, backend.Hits())
+	assertRejected(t, rec, backend, 0, http.StatusServiceUnavailable, "service unavailable")
+}
+
+// --- Basic auth leg ------------------------------------------------
+//
+// See NewMiddleware's doc comment for the precedence these exercise:
+// a presented Basic credential is Basic's alone to decide, ahead of
+// JWT; only a credential-less request reaches SAML or the combined
+// no-credential 401.
+
+// newBasicMiddleware wires a Basic-only config, returning the handler
+// and the backend it fronts.
+func newBasicMiddleware(t *testing.T, extra ...config.JWTSource) (http.Handler, *backendStub) {
+	t.Helper()
+
+	basicSrc := basicSourceFor(t)
+	backend := &backendStub{}
+	source := newFakeSource(t, &config.Config{Inbound: config.InboundConfig{Auth: config.InboundAuthConfig{
+		JWT:   extra,
+		Basic: &basicSrc,
+	}}})
+
+	reg := NewRegistry(testLogger())
+	t.Cleanup(reg.Close)
+	return newTestMiddleware(t, source, reg)(backend.Handler()), backend
+}
+
+func basicRequest(t *testing.T, username, password string) *http.Request {
+	t.Helper()
+	r := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
+	r.SetBasicAuth(username, password)
+	return r
+}
+
+func TestMiddleware_BasicOnly_ValidCredentialForwards(t *testing.T) {
+	handler, backend := newBasicMiddleware(t)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, basicRequest(t, "alice", "hunter2"))
+
+	assertProxied(t, rec, backend, 1)
+	assert.NotEmpty(t, backend.lastAuthValue.Load(),
+		"the Authorization header is forwarded unchanged, like every other leg")
+}
+
+func TestMiddleware_BasicOnly_BadPasswordRejects(t *testing.T) {
+	handler, backend := newBasicMiddleware(t)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, basicRequest(t, "alice", "wrong"))
+
+	assert.Equal(t, `Basic realm="test-realm", charset="UTF-8"`, rec.Header().Get("WWW-Authenticate"))
+	assertRejected(t, rec, backend, 0, http.StatusUnauthorized, "unauthorized")
+}
+
+func TestMiddleware_BasicOnly_NoCredentialChallenges(t *testing.T) {
+	handler, backend := newBasicMiddleware(t)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil))
+
+	assert.Equal(t, `Basic realm="test-realm", charset="UTF-8"`, rec.Header().Get("WWW-Authenticate"))
+	assertRejected(t, rec, backend, 0, http.StatusUnauthorized, "unauthorized")
+}
+
+func TestMiddleware_BasicOnly_MalformedHeaderRejects(t *testing.T) {
+	handler, backend := newBasicMiddleware(t)
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Basic not-valid-base64!!")
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assertRejected(t, rec, backend, 0, http.StatusUnauthorized, "unauthorized")
+}
+
+func TestMiddleware_BasicOnly_OtherSchemePassesThroughToNoCredential(t *testing.T) {
+	handler, _ := newBasicMiddleware(t)
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Digest username=alice")
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	// Not Basic-shaped, so it's treated as no credential at all rather
+	// than as a malformed Basic one.
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Equal(t, `Basic realm="test-realm", charset="UTF-8"`, rec.Header().Get("WWW-Authenticate"))
+}
+
+func TestMiddleware_Composition_BasicCredentialDecidesBeforeJWT(t *testing.T) {
+	idp := NewTestIDP(t)
+	jwtSrc := jwtSourceFor(idp)
+	// A JWT source reading the same header with no prefix: without
+	// Basic taking the request first, this would extract the Basic
+	// credential and reject it as a malformed token. (config.Validate
+	// rejects this pairing outright; fakeSource.set runs Validate, so
+	// the source is staged as disabled to get it past that and still
+	// exercise the middleware ordering.)
+	jwtSrc.Credentials = []config.CredentialLocation{{Location: "header", Name: "Authorization"}}
+	jwtSrc.Disabled = true
+
+	handler, backend := newBasicMiddleware(t, jwtSrc)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, basicRequest(t, "alice", "hunter2"))
+
+	assertProxied(t, rec, backend, 1)
+}
+
+func TestMiddleware_Composition_BasicAndJWT_NoCredentialOffersBothChallenges(t *testing.T) {
+	idp := NewTestIDP(t)
+	handler, backend := newBasicMiddleware(t, jwtSourceFor(idp))
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil))
+
+	assertRejected(t, rec, backend, 0, http.StatusUnauthorized, "unauthorized")
+	assert.Equal(t, []string{`Basic realm="test-realm", charset="UTF-8"`, "Bearer"},
+		rec.Header().Values("WWW-Authenticate"),
+		"a credential-less request is answerable by either scheme, so both are offered")
+}
+
+func TestMiddleware_Composition_BasicAndJWT_BearerTokenStillReachesJWT(t *testing.T) {
+	idp := NewTestIDP(t)
+	handler, backend := newBasicMiddleware(t, jwtSourceFor(idp))
+
+	token := idp.Sign(t, jwt.RegisteredClaims{Issuer: idp.Issuer, ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour))})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, bearerRequest(t, token))
+
+	assertProxied(t, rec, backend, 1)
+}
+
+func TestMiddleware_Composition_BasicAndSAML_ACSPathIsStillDispatchedFirst(t *testing.T) {
+	t.Setenv("MIDDLEWARE_BASIC_SAML_KEY", validSAMLSessionKeyForTest)
+
+	samlIDP := NewTestSAMLIDP(t)
+	samlIDP.SetUser("user@example.com", nil)
+	samlSrc := samlSourceFor(t, samlIDP, "MIDDLEWARE_BASIC_SAML_KEY")
+	basicSrc := basicSourceFor(t)
+
+	backend := &backendStub{}
+	source := newFakeSource(t, &config.Config{Inbound: config.InboundConfig{Auth: config.InboundAuthConfig{
+		SAML:  &samlSrc,
+		Basic: &basicSrc,
+	}}})
+
+	reg := NewRegistry(testLogger())
+	t.Cleanup(reg.Close)
+	handler := newTestMiddleware(t, source, reg)(backend.Handler())
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, samlSrc.ACSPath, nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	assert.NotEqual(t, http.StatusUnauthorized, rec.Code,
+		"the ACS callback must never be answered with a Basic challenge")
+}
+
+func TestMiddleware_Composition_BasicAndSAML_CredentiallessRequestRedirects(t *testing.T) {
+	t.Setenv("MIDDLEWARE_BASIC_SAML_REDIRECT_KEY", validSAMLSessionKeyForTest)
+
+	samlIDP := NewTestSAMLIDP(t)
+	samlIDP.SetUser("user@example.com", nil)
+	samlSrc := samlSourceFor(t, samlIDP, "MIDDLEWARE_BASIC_SAML_REDIRECT_KEY")
+	basicSrc := basicSourceFor(t)
+
+	backend := &backendStub{}
+	source := newFakeSource(t, &config.Config{Inbound: config.InboundConfig{Auth: config.InboundAuthConfig{
+		SAML:  &samlSrc,
+		Basic: &basicSrc,
+	}}})
+
+	reg := NewRegistry(testLogger())
+	t.Cleanup(reg.Close)
+	handler := newTestMiddleware(t, source, reg)(backend.Handler())
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil))
+
+	// Documented consequence of SAML's step preceding the combined
+	// challenge: with SAML enabled, Basic only serves clients that send
+	// the header proactively — there's no browser password prompt.
+	assert.Equal(t, http.StatusFound, rec.Code)
+	assert.Empty(t, rec.Header().Values("WWW-Authenticate"))
+
+	// A proactively-presented Basic credential is still honored.
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, basicRequest(t, "alice", "hunter2"))
+	assertProxied(t, rec, backend, 1)
+}
+
+func TestMiddleware_BasicOnly_UnknownUserRejects(t *testing.T) {
+	handler, backend := newBasicMiddleware(t)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, basicRequest(t, "mallory", "hunter2"))
+
+	assert.Equal(t, `Basic realm="test-realm", charset="UTF-8"`, rec.Header().Get("WWW-Authenticate"),
+		"an unknown user is answered identically to a wrong password")
+	assertRejected(t, rec, backend, 0, http.StatusUnauthorized, "unauthorized")
 }

@@ -53,6 +53,45 @@ func extractFrom(r *http.Request, loc config.CredentialLocation) (string, bool) 
 	return v, true
 }
 
+// basicPrefix is the scheme prefix an Authorization header must carry
+// to be treated as a Basic credential. Matched case-insensitively for
+// the same reason extractFrom matches its prefixes that way: RFC 7235
+// auth-scheme tokens are case-insensitive. The trailing space is part
+// of the match, so a different scheme whose name merely starts the same
+// way ("BasicPlus ...") isn't mistaken for this one.
+const basicPrefix = "Basic "
+
+// basicExtraction is the tri-state result of looking for a Basic
+// credential. "Present but unparseable" has to be distinguishable from
+// "absent" so the middleware can reject the former outright rather than
+// letting a garbled Basic header fall through to another auth leg that
+// would only reject it more confusingly.
+type basicExtraction int
+
+const (
+	basicAbsent    basicExtraction = iota // no Authorization header, or it names another scheme
+	basicMalformed                        // Basic scheme, but not decodable as "user:pass"
+	basicPresent                          // a credential was extracted (not that it verifies)
+)
+
+// extractBasic returns the username and password from r's Authorization
+// header. Parsing is delegated to net/http's own BasicAuth (base64 plus
+// the split on the first colon, per RFC 7617), with the scheme checked
+// first so that a header belonging to some other scheme is reported as
+// absent rather than malformed.
+func extractBasic(r *http.Request) (username, password string, res basicExtraction) {
+	v := r.Header.Get("Authorization")
+	if len(v) < len(basicPrefix) || !strings.EqualFold(v[:len(basicPrefix)], basicPrefix) {
+		return "", "", basicAbsent
+	}
+
+	u, p, ok := r.BasicAuth()
+	if !ok {
+		return "", "", basicMalformed
+	}
+	return u, p, basicPresent
+}
+
 // extractToken walks every enabled JWT source's Credentials, in
 // configuration order, source by source, and returns the first
 // successfully extracted credential — "first non-empty wins" means
