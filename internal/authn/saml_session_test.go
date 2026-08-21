@@ -1,6 +1,7 @@
 package authn
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -92,17 +93,26 @@ func TestSAMLSessionCodec_Tampered(t *testing.T) {
 	encoded, err := codec.Encode(session)
 	require.NoError(t, err)
 
-	// Replace the final character with one it definitely isn't:
-	// substituting a fixed byte is a no-op whenever the signature
-	// already ends in that byte (about one run in sixty-four, given
-	// base64url's alphabet), which would hand Decode an untampered
-	// token and fail this test for the wrong reason.
-	replacement := byte('x')
-	if encoded[len(encoded)-1] == replacement {
-		replacement = 'y'
+	// Tamper with the *first* character of the signature, deliberately
+	// not the last. A 32-byte HMAC is 256 bits, so its final base64url
+	// character carries only four significant bits — the remaining two
+	// are don't-care, and Go's (non-strict) decoder ignores them. Four
+	// different final characters therefore decode to the identical
+	// signature, so editing the last character leaves the token valid
+	// often enough to make this test flaky. Every bit of the first
+	// character is significant, so changing it always changes the
+	// signature.
+	dot := strings.LastIndexByte(encoded, '.')
+	require.Positive(t, dot, "expected a JWT-shaped session token")
+	sig := []byte(encoded[dot+1:])
+	require.NotEmpty(t, sig)
+	if sig[0] == 'A' {
+		sig[0] = 'B'
+	} else {
+		sig[0] = 'A'
 	}
-	tampered := encoded[:len(encoded)-1] + string(replacement)
-	_, err = codec.Decode(tampered)
+
+	_, err = codec.Decode(encoded[:dot+1] + string(sig))
 	require.Error(t, err)
 }
 
