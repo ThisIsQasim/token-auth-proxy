@@ -236,8 +236,7 @@ target: http://backend-a:9000
 inbound:
   auth:
     jwt:
-      - name: jwt-a
-        issuer: https://issuer.example.com
+      - issuer: https://issuer.example.com
         jwks_url: https://issuer.example.com/jwks.json
 `)
 
@@ -250,8 +249,7 @@ inbound:
 	assert.Contains(t, logs, "config reloaded", "an inbound.auth-only change must still trigger the reload log")
 	assert.NotContains(t, logs, "restart the process", "inbound.auth is hot-reloaded, not restart-required")
 
-	_, found := w.Current().Inbound.Auth.JWTSourceByIssuer("https://issuer.example.com")
-	assert.True(t, found)
+	assert.Len(t, w.Current().Inbound.Auth.JWTSourcesByIssuer("https://issuer.example.com"), 1)
 
 	// Disable the only source; Enabled() must flip back to false, and
 	// the lookup must stop finding it.
@@ -260,8 +258,7 @@ target: http://backend-a:9000
 inbound:
   auth:
     jwt:
-      - name: jwt-a
-        issuer: https://issuer.example.com
+      - issuer: https://issuer.example.com
         jwks_url: https://issuer.example.com/jwks.json
         disabled: true
 `)
@@ -271,8 +268,7 @@ inbound:
 	})
 	assert.True(t, ok, "expected Enabled() to flip to false once the only source is disabled")
 
-	_, found = w.Current().Inbound.Auth.JWTSourceByIssuer("https://issuer.example.com")
-	assert.False(t, found, "a disabled source must not be found by lookup after a hot-reload")
+	assert.Empty(t, w.Current().Inbound.Auth.JWTSourcesByIssuer("https://issuer.example.com"), "a disabled source must not be found by lookup after a hot-reload")
 }
 
 // TestWatcher_JSONListOverridePersistsAcrossReload mirrors
@@ -280,7 +276,7 @@ inbound:
 // override: TAP_INBOUND_AUTH_JWT_JSON must keep winning over the file's
 // own inbound.auth.jwt across a real reload, not just at startup.
 func TestWatcher_JSONListOverridePersistsAcrossReload(t *testing.T) {
-	t.Setenv("TAP_INBOUND_AUTH_JWT_JSON", `[{"name":"from-env","issuer":"https://env.example.com","jwks_url":"https://env.example.com/jwks.json"}]`)
+	t.Setenv("TAP_INBOUND_AUTH_JWT_JSON", `[{"issuer":"https://env.example.com","jwks_url":"https://env.example.com/jwks.json"}]`)
 
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	writeAtomic(t, path, `
@@ -288,8 +284,7 @@ target: http://backend-a:9000
 inbound:
   auth:
     jwt:
-      - name: from-file
-        issuer: https://file.example.com
+      - issuer: https://file.example.com
         jwks_url: https://file.example.com/jwks.json
 `)
 
@@ -302,7 +297,7 @@ inbound:
 	startWatcher(t, w)
 
 	require.Len(t, w.Current().Inbound.Auth.JWT, 1)
-	require.Equal(t, "from-env", w.Current().Inbound.Auth.JWT[0].Name, "env override should win over the file at startup")
+	require.Equal(t, "https://env.example.com", w.Current().Inbound.Auth.JWT[0].Issuer, "env override should win over the file at startup")
 
 	// Change the file's list; the env override must still win after a
 	// real reload, not just at the initial load.
@@ -311,8 +306,7 @@ target: http://backend-a:9000
 inbound:
   auth:
     jwt:
-      - name: from-file-v2
-        issuer: https://file-v2.example.com
+      - issuer: https://file-v2.example.com
         jwks_url: https://file-v2.example.com/jwks.json
 `)
 
@@ -322,6 +316,6 @@ inbound:
 	require.True(t, ok, "expected a reload to happen")
 
 	require.Len(t, w.Current().Inbound.Auth.JWT, 1)
-	assert.Equal(t, "from-env", w.Current().Inbound.Auth.JWT[0].Name,
+	assert.Equal(t, "https://env.example.com", w.Current().Inbound.Auth.JWT[0].Issuer,
 		"env override on inbound.auth.jwt must still win after the reload, even though the file changed it")
 }

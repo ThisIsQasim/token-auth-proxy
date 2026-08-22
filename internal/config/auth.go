@@ -82,9 +82,14 @@ type OutboundConfig struct{}
 // flipping one section-level flag that could contradict it.
 //
 // JWT is a list (multiple trusted issuers are entirely practical: a
-// bearer token carries its own iss claim, so JWTSourceByIssuer can
-// route to the right source after the fact, regardless of which single
-// backend Target every request ultimately forwards to). SAML is at
+// bearer token carries its own iss claim, so JWTSourcesByIssuer can
+// route to the right source(s) after the fact, regardless of which
+// single backend Target every request ultimately forwards to). More
+// than one source may share an Issuer — e.g. rolling a JWKS/CA
+// migration, or trusting two independent key sets under one nominal
+// issuer — in which case JWTSourcesByIssuer returns all of them, in
+// config order, and the JWT middleware tries each in turn until one
+// fully verifies the token (see enforceJWT). SAML is at
 // most one source, deliberately not a list: unlike a bearer token, a
 // SAML SP-initiated redirect has to pick an IdP to send the browser to
 // before any credential exists, and with only one Target and no
@@ -99,9 +104,9 @@ type OutboundConfig struct{}
 // than SAML's: a Basic challenge names exactly one realm, and with no
 // per-path routing there's nothing to pick a second realm's user list
 // by (two user lists guarding the same single Target is one user
-// list). Unlike JWT and SAML it carries no Name field at all — there's
-// only ever one of it, so logs identify it as "basic" and there's
-// nothing for Validate's uniqueness checks to disambiguate.
+// list). Unlike JWT and SAML, it has no Name of its own — there's only
+// ever one of it, so logs identify it as "basic" and there's nothing
+// for Validate's uniqueness check to disambiguate.
 type InboundAuthConfig struct {
 	JWT   []JWTSource  `yaml:"jwt,omitempty"`
 	SAML  *SAMLSource  `yaml:"saml,omitempty"`
@@ -172,9 +177,9 @@ func (a InboundAuthConfig) BasicEnabled() bool {
 }
 
 // markUnique records val as seen under label in seen, or returns an
-// error if it was already there. Shared by Validate's name/issuer
-// uniqueness checks (across JWT sources and the single SAML source) so
-// the "already used by another source" message and bookkeeping aren't
+// error if it was already there. Shared by Validate's name uniqueness
+// check (across JWT sources and the single SAML source) so the
+// "already used by another source" message and bookkeeping aren't
 // repeated per field.
 func markUnique(seen map[string]bool, label, val string) error {
 	if seen[val] {
@@ -187,14 +192,17 @@ func markUnique(seen map[string]bool, label, val string) error {
 // Validate validates every JWT source, the SAML source and the Basic
 // source (if any) unconditionally — a source is either well-formed or
 // it isn't, regardless of whether it or any sibling happens to be
-// Disabled right now — then cross-checks that Name/Issuer aren't reused
-// between JWT sources and the SAML source. Basic takes no part in those
-// two checks: it has neither a Name nor an Issuer, since there's only
-// ever one of it. There's no acs_path/session_cookie uniqueness check
-// to make either, since at most one SAML source can ever exist.
+// Disabled right now — then cross-checks that Name isn't reused
+// between JWT sources and the SAML source. Name defaults to a source's
+// own Issuer (see JWTSource.applyDefaults/SAMLSource.applyDefaults),
+// so this is a no-op to satisfy in the common case (each source names
+// a distinct issuer) and only demands an explicit, distinct name once
+// two sources deliberately share an Issuer (see JWTSourcesByIssuer).
+// Basic takes no part in this check: it has no Name, since there's
+// only ever one of it. There's no acs_path/session_cookie uniqueness
+// check to make either, since at most one SAML source can ever exist.
 func (a *InboundAuthConfig) Validate() error {
 	names := make(map[string]bool, len(a.JWT)+1)
-	issuers := make(map[string]bool, len(a.JWT)+1)
 
 	for i := range a.JWT {
 		j := &a.JWT[i]
@@ -204,9 +212,6 @@ func (a *InboundAuthConfig) Validate() error {
 		if err := markUnique(names, "name", j.Name); err != nil {
 			return fmt.Errorf("inbound.auth.jwt[%d]: %w", i, err)
 		}
-		if err := markUnique(issuers, "issuer", j.Issuer); err != nil {
-			return fmt.Errorf("inbound.auth.jwt[%d]: %w", i, err)
-		}
 	}
 
 	if a.SAML != nil {
@@ -214,9 +219,6 @@ func (a *InboundAuthConfig) Validate() error {
 			return fmt.Errorf("inbound.auth.saml: %w", err)
 		}
 		if err := markUnique(names, "name", a.SAML.Name); err != nil {
-			return fmt.Errorf("inbound.auth.saml: %w", err)
-		}
-		if err := markUnique(issuers, "issuer", a.SAML.Issuer); err != nil {
 			return fmt.Errorf("inbound.auth.saml: %w", err)
 		}
 
@@ -266,23 +268,59 @@ func (a *InboundAuthConfig) Validate() error {
 	return nil
 }
 
-// JWTSourceByIssuer returns the enabled JWT source trusting iss, if
-// any. Disabled entries are skipped — that's the actual behavioral
-// meaning of the field. Validate guarantees at most one source (across
-// JWT and the single SAML source) can claim a given issuer, so a linear
-// scan needs no tie-breaking.
+// JWTSourcesByIssuer returns every enabled JWT source trusting iss, in
+// the order they appear under inbound.auth.jwt. Disabled entries are
+// skipped — that's the actual behavioral meaning of the field. Usually
+// this is zero or one source; more than one is deliberate (see this
+// type's own doc comment) and the caller — enforceJWT — tries each
+// returned source in order, moving on only if the previous one's
+// entire verification (signature, exp/nbf, audiences, algorithms)
+// failed, so the returned order is itself part of the behavior, not
+// just a convenience.
 //
 // There's no SAML equivalent of this lookup: with at most one SAML
 // source, a caller already knows which source it's dealing with — it's
 // InboundAuthConfig.SAML, or there isn't one — so there's nothing to
 // disambiguate by issuer in the first place.
-func (a InboundAuthConfig) JWTSourceByIssuer(iss string) (JWTSource, bool) {
-	for _, j := range a.JWT {
-		if !j.Disabled && j.Issuer == iss {
-			return j, true
+//
+// Called once per JWT-authenticated request (see enforceJWT), so the
+// zero/one-match case - the overwhelming majority - is worth keeping
+// allocation-free: it's answered by reslicing directly into a.JWT's
+// own backing array rather than appending into a fresh one. That's
+// safe only because InboundAuthConfig is never mutated after
+// construction (config.Watcher publishes a brand-new *Config on every
+// reload rather than mutating a published one - see Registry's doc
+// comment for the identical invariant) - the returned slice aliases
+// a.JWT, so a caller that mutated it would corrupt the live config.
+// Two or more matches falls back to a fresh copy, both because that
+// path is rare enough that the allocation doesn't matter and because
+// a real slice keeps the result independent of a.JWT's element order.
+func (a InboundAuthConfig) JWTSourcesByIssuer(iss string) []JWTSource {
+	first := -1
+	n := 0
+	for i := range a.JWT {
+		if !a.JWT[i].Disabled && a.JWT[i].Issuer == iss {
+			if n == 0 {
+				first = i
+			}
+			n++
 		}
 	}
-	return JWTSource{}, false
+
+	switch n {
+	case 0:
+		return nil
+	case 1:
+		return a.JWT[first : first+1]
+	}
+
+	matches := make([]JWTSource, 0, n)
+	for i := range a.JWT {
+		if !a.JWT[i].Disabled && a.JWT[i].Issuer == iss {
+			matches = append(matches, a.JWT[i])
+		}
+	}
+	return matches
 }
 
 // JWTSource describes one trusted JWT issuer: where to fetch its key
@@ -293,16 +331,25 @@ func (a InboundAuthConfig) JWTSourceByIssuer(iss string) (JWTSource, bool) {
 // fields, or vice versa, so there's no "wrong fields for this type" of
 // validation to write.
 type JWTSource struct {
-	Name     string `yaml:"name"`               // required, unique across JWT+SAML — for logs/errors
+	// Name identifies this source in logs/errors and is what Validate
+	// requires be unique across JWT+SAML — not Issuer. Optional: it
+	// defaults to this source's own Issuer (see applyDefaults), so the
+	// common case (one source per issuer) never needs it written down.
+	// An explicit Name is only required once two sources deliberately
+	// share an Issuer, to give each a distinct identity — see this
+	// package's InboundAuthConfig doc comment for why that's supported
+	// at all, and JWTSourcesByIssuer for how such sources are tried.
+	Name     string `yaml:"name,omitempty"`
 	Disabled bool   `yaml:"disabled,omitempty"` // default false (Go's zero value); excludes just this source from lookup/routing without affecting any other source
-	Issuer   string `yaml:"issuer"`             // required, unique across JWT+SAML — the routing key once a credential's been extracted
+	Issuer   string `yaml:"issuer"`             // required — the routing key once a credential's been extracted; need not be unique (see Name)
 
 	Audiences        []string             `yaml:"audiences,omitempty"`   // if set, token's aud must contain one of these
 	Credentials      []CredentialLocation `yaml:"credentials,omitempty"` // tried in order, first non-empty wins; defaults to [{header, Authorization, "Bearer "}] if omitted
 	JWKSURL          string               `yaml:"jwks_url,omitempty"`    // exactly one of JWKSURL/OIDCDiscoveryURL
 	OIDCDiscoveryURL string               `yaml:"oidc_discovery_url,omitempty"`
 
-	// CACert is an optional PEM-encoded CA bundle used to verify the TLS
+	// CACert is an optional PEM-encoded (or that same PEM, base64-encoded
+	// — see ParseCACertPool) CA bundle used to verify the TLS
 	// certificate of this source's jwks_url/oidc_discovery_url (and, for
 	// a discovery URL, the jwks_uri it resolves to). Empty — the default
 	// — means the system trust store, exactly as before.
@@ -333,6 +380,9 @@ type JWTSource struct {
 // missing default just means credentials are rejected (fails closed),
 // not a silent downgrade.
 func (j *JWTSource) applyDefaults() {
+	if j.Name == "" {
+		j.Name = j.Issuer
+	}
 	if j.JWKSCacheTTL == 0 {
 		j.JWKSCacheTTL = defaultJWKSCacheTTL
 	}
@@ -352,9 +402,6 @@ func (j *JWTSource) applyDefaults() {
 // applyDefaults has already run, so Algorithms and Credentials are
 // never empty here.
 func (j *JWTSource) validate() error {
-	if j.Name == "" {
-		return fmt.Errorf("name is required")
-	}
 	if j.Issuer == "" {
 		return fmt.Errorf("issuer is required")
 	}
@@ -418,9 +465,13 @@ func (j *JWTSource) validate() error {
 // resulting session is tracked. See InboundAuthConfig's doc comment for
 // why this is a single optional value rather than a list like JWTSource.
 type SAMLSource struct {
-	Name     string `yaml:"name"`
+	// Name identifies this source in logs/errors and is what Validate
+	// requires be unique across JWT+SAML — not Issuer. Optional: it
+	// defaults to this source's own Issuer (see applyDefaults). See
+	// JWTSource.Name for the full rationale, shared with this field.
+	Name     string `yaml:"name,omitempty"`
 	Disabled bool   `yaml:"disabled,omitempty"`
-	Issuer   string `yaml:"issuer"` // the IdP's entity ID
+	Issuer   string `yaml:"issuer"` // required — the IdP's entity ID; need not be unique (see Name)
 
 	Audiences            []string      `yaml:"audiences,omitempty"`
 	IDPMetadataURL       string        `yaml:"idp_metadata_url,omitempty"`        // required
@@ -449,6 +500,9 @@ type SAMLSource struct {
 
 // applyDefaults fills zero-value fields.
 func (s *SAMLSource) applyDefaults() {
+	if s.Name == "" {
+		s.Name = s.Issuer
+	}
 	if s.SessionDuration == 0 {
 		s.SessionDuration = defaultSessionDuration
 	}
@@ -460,9 +514,6 @@ func (s *SAMLSource) applyDefaults() {
 // validate checks a single SAMLSource in isolation (no cross-source
 // checks — those live in InboundAuthConfig.Validate).
 func (s *SAMLSource) validate() error {
-	if s.Name == "" {
-		return fmt.Errorf("name is required")
-	}
 	if s.Issuer == "" {
 		return fmt.Errorf("issuer is required")
 	}
@@ -537,7 +588,8 @@ func (s *SAMLSource) validate() error {
 // source: a fixed list of users, each with a bcrypt password hash, and
 // the realm to advertise when challenging. See InboundAuthConfig's doc
 // comment for why this is one optional value rather than a list, and
-// why it has no Name.
+// why — unlike JWT and SAML, which identify themselves by Issuer — it
+// has no identifying field at all.
 //
 // Passwords are stored only as bcrypt hashes, never plaintext — a
 // plaintext value is rejected at load time by validate below, not

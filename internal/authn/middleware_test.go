@@ -1,10 +1,13 @@
 package authn
 
 import (
+	"context"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -127,7 +130,7 @@ func assertRedirected(t *testing.T, rec *httptest.ResponseRecorder, backend *bac
 // doc comment), so tests that need those defaults set them here.
 func jwtSourceFor(idp *TestIDP) config.JWTSource {
 	return config.JWTSource{
-		Name:        idp.Issuer,
+		Name:        idp.Issuer, // what applyDefaults would produce; fakeSource.set doesn't call it (see its doc comment)
 		Issuer:      idp.Issuer,
 		JWKSURL:     idp.JWKSURL,
 		Algorithms:  []string{"RS256"},
@@ -165,7 +168,7 @@ func samlSourceFor(t *testing.T, idp *TestSAMLIDP, sessionKeyEnv string) config.
 	const proxyBase = "https://proxy.example.com"
 	const acsPath = "/saml/acs"
 	src := config.SAMLSource{
-		Name:                 "saml-a",
+		Name:                 idp.Issuer, // what applyDefaults would produce; fakeSource.set doesn't call it (see its doc comment)
 		Issuer:               idp.Issuer,
 		IDPMetadataURL:       idp.MetadataURL,
 		IDPMetadataCacheTTL:  time.Minute,
@@ -302,6 +305,190 @@ func TestMiddleware_UnknownIssuer_Rejected(t *testing.T) {
 	mw(backend.Handler()).ServeHTTP(rec, bearerRequest(t, token))
 
 	assertRejected(t, rec, backend, 0, http.StatusUnauthorized, "unauthorized")
+}
+
+// TestMiddleware_MultipleSourcesShareIssuer_SecondCandidateSucceeds is
+// the end-to-end proof of InboundAuthConfig's "try each source sharing
+// an issuer in turn" behavior: two independent IdPs configured under
+// the identical Issuer string, a token signed by the *second* one, and
+// the request still gets through - the first candidate's failure
+// (wrong key, so signature verification fails) doesn't end the
+// attempt, it just moves on to the next configured source.
+func TestMiddleware_MultipleSourcesShareIssuer_SecondCandidateSucceeds(t *testing.T) {
+	const sharedIssuer = "https://shared-issuer.example.com"
+	first := NewTestIDP(t, WithIssuer(sharedIssuer), WithKID("first"))
+	second := NewTestIDP(t, WithIssuer(sharedIssuer), WithKID("second"))
+	second.Rotate(t) // ensure first/second really don't share a keypair
+
+	firstSrc := jwtSourceFor(first)
+	firstSrc.Name = "first"
+	secondSrc := jwtSourceFor(second)
+	secondSrc.Name = "second"
+
+	backend := &backendStub{}
+	source := newFakeSource(t, &config.Config{Inbound: config.InboundConfig{Auth: config.InboundAuthConfig{
+		JWT: []config.JWTSource{firstSrc, secondSrc},
+	}}})
+	reg := NewRegistry(testLogger())
+	t.Cleanup(reg.Close)
+	mw := newTestMiddleware(t, source, reg)
+
+	// Signed by second's (post-rotation) key, but claiming the shared
+	// issuer - first's JWKS has no matching key for it.
+	token := second.Sign(t, jwt.RegisteredClaims{Issuer: sharedIssuer, ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour))})
+
+	rec := httptest.NewRecorder()
+	mw(backend.Handler()).ServeHTTP(rec, bearerRequest(t, token))
+
+	assertProxied(t, rec, backend, 1)
+}
+
+// TestMiddleware_MultipleSourcesShareIssuer_AllFail_Rejected is the
+// companion case: when every source sharing an issuer fails to verify
+// the token, the request is rejected exactly as it would be for a
+// single-source config - trying multiple candidates never turns into
+// forwarding on a partial or ambiguous result.
+func TestMiddleware_MultipleSourcesShareIssuer_AllFail_Rejected(t *testing.T) {
+	const sharedIssuer = "https://shared-issuer.example.com"
+	first := NewTestIDP(t, WithIssuer(sharedIssuer), WithKID("first"))
+	second := NewTestIDP(t, WithIssuer(sharedIssuer), WithKID("second"))
+	second.Rotate(t)
+	other := NewTestIDP(t, WithIssuer(sharedIssuer), WithKID("other"))
+	other.Rotate(t) // a fresh keypair, distinct from both configured sources'
+
+	firstSrc := jwtSourceFor(first)
+	firstSrc.Name = "first"
+	secondSrc := jwtSourceFor(second)
+	secondSrc.Name = "second"
+
+	backend := &backendStub{}
+	source := newFakeSource(t, &config.Config{Inbound: config.InboundConfig{Auth: config.InboundAuthConfig{
+		JWT: []config.JWTSource{firstSrc, secondSrc},
+	}}})
+	reg := NewRegistry(testLogger())
+	t.Cleanup(reg.Close)
+	mw := newTestMiddleware(t, source, reg)
+
+	// Signed by neither configured source's key.
+	token := other.Sign(t, jwt.RegisteredClaims{Issuer: sharedIssuer, ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour))})
+
+	rec := httptest.NewRecorder()
+	mw(backend.Handler()).ServeHTTP(rec, bearerRequest(t, token))
+
+	assertRejected(t, rec, backend, 0, http.StatusUnauthorized, "unauthorized")
+}
+
+// recordingHandler is a minimal slog.Handler that keeps every record
+// passed to it, so a test can assert on the reason/level actually
+// logged for a rejection — the response body itself never says why
+// (see reason's doc comment in authn.go), so the log line is the only
+// externally-observable signal of *which* reason enforceJWT reported.
+type recordingHandler struct {
+	mu      *sync.Mutex
+	records *[]slog.Record
+}
+
+func newRecordingLogger() (*slog.Logger, *recordingHandler) {
+	h := &recordingHandler{mu: &sync.Mutex{}, records: &[]slog.Record{}}
+	return slog.New(h), h
+}
+
+func (h *recordingHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *recordingHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	*h.records = append(*h.records, r)
+	return nil
+}
+
+func (h *recordingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *recordingHandler) WithGroup(string) slog.Handler      { return h }
+
+// last returns the most recently handled record's "reason" attribute
+// and level, failing the test if nothing was ever logged.
+func (h *recordingHandler) last(t *testing.T) (reason string, level slog.Level) {
+	t.Helper()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	require.NotEmpty(t, *h.records, "expected at least one log record")
+	rec := (*h.records)[len(*h.records)-1]
+	rec.Attrs(func(a slog.Attr) bool {
+		if a.Key == "reason" {
+			reason = a.Value.String()
+			return false
+		}
+		return true
+	})
+	return reason, rec.Level
+}
+
+// TestMiddleware_MultipleSourcesShareIssuer_KeysUnavailableReasonWins is
+// the end-to-end proof of enforceJWT's priority rule, spelled out in its
+// own doc comment: when candidates sharing an issuer fail for different
+// reasons, a reasonKeysUnavailable failure always wins the reported
+// reason over a later, ordinary verification failure - even though it
+// wasn't the last candidate tried. That priority only matters when it
+// changes the outcome, so this configures the *first* source to be the
+// one whose JWKS/discovery endpoint is unreachable and the *second* (the
+// one actually tried last) to fail for the ordinary reason (wrong key) -
+// proving the reported reason isn't simply "whichever failed last".
+//
+// The response body can't distinguish the two (both are a bare 401
+// "unauthorized" - see reason's doc comment), so this asserts on the
+// structured log line instead: reason=keys_unavailable at Warn level,
+// not the ordinary reason at Info level rejectChallenges would otherwise
+// log for a routine bad-signature failure.
+func TestMiddleware_MultipleSourcesShareIssuer_KeysUnavailableReasonWins(t *testing.T) {
+	const sharedIssuer = "https://shared-issuer.example.com"
+
+	unreachableSrc := config.JWTSource{
+		Name:   "unreachable",
+		Issuer: sharedIssuer,
+		// No listener on this port; Registry.Keyfunc's synchronous OIDC
+		// discovery fetch fails immediately with a dial error, which is
+		// exactly what reasonKeysUnavailable means - an operator problem
+		// (endpoint down), not a token problem.
+		OIDCDiscoveryURL: "http://127.0.0.1:1/.well-known/openid-configuration",
+		Algorithms:       []string{"RS256"},
+		Credentials:      []config.CredentialLocation{{Location: "header", Name: "Authorization", Prefix: "Bearer "}},
+	}
+
+	working := NewTestIDP(t, WithIssuer(sharedIssuer), WithKID("working"))
+	other := NewTestIDP(t, WithIssuer(sharedIssuer), WithKID("other"))
+	other.Rotate(t) // a fresh keypair, distinct from working's
+
+	workingSrc := jwtSourceFor(working)
+	workingSrc.Name = "working"
+
+	backend := &backendStub{}
+	source := newFakeSource(t, &config.Config{Inbound: config.InboundConfig{Auth: config.InboundAuthConfig{
+		// unreachableSrc listed first, so its keys_unavailable failure is
+		// the *first* one seen - and workingSrc, tried second, is the one
+		// that determines what a naive "report whatever failed last"
+		// implementation would show instead.
+		JWT: []config.JWTSource{unreachableSrc, workingSrc},
+	}}})
+	reg := NewRegistry(testLogger())
+	t.Cleanup(reg.Close)
+
+	logger, handler := newRecordingLogger()
+	samlReg := NewSAMLRegistry(logger)
+	t.Cleanup(samlReg.Close)
+	mw := NewMiddleware(source, reg, samlReg, NewBasicRegistry(logger), logger)
+
+	// Signed by neither configured source's key - working's real JWKS
+	// has no matching key for it, so verification fails ordinarily.
+	token := other.Sign(t, jwt.RegisteredClaims{Issuer: sharedIssuer, ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour))})
+
+	rec := httptest.NewRecorder()
+	mw(backend.Handler()).ServeHTTP(rec, bearerRequest(t, token))
+
+	assertRejected(t, rec, backend, 0, http.StatusUnauthorized, "unauthorized")
+
+	loggedReason, level := handler.last(t)
+	assert.Equal(t, string(reasonKeysUnavailable), loggedReason, "the first candidate's operator-actionable failure must win over the second's routine one")
+	assert.Equal(t, slog.LevelWarn, level, "reasonKeysUnavailable must log at Warn, not the Info level an ordinary failure would get")
 }
 
 func TestMiddleware_MuxWiring_HealthzStaysUnauthenticated(t *testing.T) {
@@ -487,7 +674,6 @@ func TestMiddleware_Composition_SAMLMetadataUnavailable_ServiceUnavailable(t *te
 	jwtSrc := jwtSourceFor(jwtIDP)
 
 	samlSrc := config.SAMLSource{
-		Name:                 "saml-a",
 		Issuer:               "https://unreachable-idp.invalid/metadata",
 		IDPMetadataURL:       "https://unreachable-idp.invalid/metadata",
 		SPBaseURL:            "https://proxy.example.com",

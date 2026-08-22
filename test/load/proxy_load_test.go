@@ -214,8 +214,7 @@ func newJWTAuthScenario(t *testing.T) *authScenario {
 		authYAML: fmt.Sprintf(`inbound:
   auth:
     jwt:
-      - name: idp
-        issuer: %q
+      - issuer: %q
         jwks_url: %q
 `, idp.Issuer, idp.JWKSURL),
 		hdr: http.Header{"Authorization": []string{"Bearer " + token}},

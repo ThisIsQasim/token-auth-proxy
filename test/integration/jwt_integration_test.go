@@ -44,8 +44,7 @@ func bearerHeader(token string) http.Header {
 }
 
 func jwtSourceYAML(idp *testutil.TestIDP) string {
-	return fmt.Sprintf(`      - name: idp
-        issuer: %q
+	return fmt.Sprintf(`      - issuer: %q
         jwks_url: %q
 `, idp.Issuer, idp.JWKSURL)
 }
@@ -139,8 +138,7 @@ target: %q
 inbound:
   auth:
     jwt:
-      - name: idp
-        issuer: %q
+      - issuer: %q
         jwks_url: %q
         audiences: ["tap"]
 `, backend.URL, idp.Issuer, idp.JWKSURL))
@@ -197,8 +195,7 @@ target: %q
 inbound:
   auth:
     jwt:
-      - name: idp
-        issuer: %q
+      - issuer: %q
         oidc_discovery_url: %q
 `, backend.URL, idp.Issuer, idp.DiscoveryURL))
 
@@ -223,8 +220,7 @@ target: %q
 inbound:
   auth:
     jwt:
-      - name: idp
-        issuer: %q
+      - issuer: %q
         jwks_url: %q
         credentials:
           - location: cookie
@@ -335,8 +331,7 @@ target: %q
 inbound:
   auth:
     jwt:
-      - name: idp
-        issuer: %q
+      - issuer: %q
         jwks_url: %q
         disabled: true
 `, backend.URL, idp.Issuer, idp.JWKSURL))

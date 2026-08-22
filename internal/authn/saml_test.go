@@ -60,7 +60,6 @@ func newFakeSAMLProvider(calls *[]samlProviderCall, mu *sync.Mutex, shouldFail f
 // NewTestIDP.
 func testSAMLSource(idp *TestSAMLIDP) config.SAMLSource {
 	return config.SAMLSource{
-		Name:                 "test-saml",
 		Issuer:               idp.Issuer,
 		IDPMetadataURL:       idp.MetadataURL,
 		IDPMetadataCacheTTL:  time.Minute,

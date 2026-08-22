@@ -21,7 +21,6 @@ import (
 // so each test only needs to mutate the one field it cares about.
 func validJWTSource() JWTSource {
 	j := JWTSource{
-		Name:    "jwt-a",
 		Issuer:  "https://issuer.example.com",
 		JWKSURL: "https://issuer.example.com/jwks.json",
 	}
@@ -38,7 +37,6 @@ func validSAMLSource(t *testing.T) SAMLSource {
 	t.Helper()
 	t.Setenv("SAML_TEST_SESSION_KEY", validSAMLSessionKey)
 	s := SAMLSource{
-		Name:                 "saml-a",
 		Issuer:               "https://idp.example.com/metadata",
 		IDPMetadataURL:       "https://idp.example.com/metadata",
 		SPBaseURL:            "https://proxy.example.com",
@@ -106,12 +104,6 @@ func TestJWTSource_Validate(t *testing.T) {
 				j.Credentials = nil
 				j.applyDefaults()
 			},
-		},
-		{
-			name:      "missing name",
-			mutate:    func(j *JWTSource) { j.Name = "" },
-			wantErr:   true,
-			errSubstr: "name is required",
 		},
 		{
 			name:      "missing issuer",
@@ -270,7 +262,6 @@ func TestSAMLSource_Validate(t *testing.T) {
 		errSubstr string
 	}{
 		{name: "valid"},
-		{name: "missing name", mutate: func(s *SAMLSource) { s.Name = "" }, wantErr: true, errSubstr: "name is required"},
 		{name: "missing issuer", mutate: func(s *SAMLSource) { s.Issuer = "" }, wantErr: true, errSubstr: "issuer is required"},
 		{
 			name: "missing idp_metadata_url", mutate: func(s *SAMLSource) { s.IDPMetadataURL = "" },
@@ -421,6 +412,9 @@ func TestInboundAuthConfig_Validate(t *testing.T) {
 	t.Run("valid multi-source, mixing disabled", func(t *testing.T) {
 		jwt := validJWTSource()
 		saml := validSAMLSource(t)
+		// Issuer is changed *after* validJWTSource's own applyDefaults
+		// already set Name from the original Issuer, so Name has to be
+		// set explicitly here too, or it'd collide with jwt's.
 		disabledJWT := validJWTSource()
 		disabledJWT.Name = "jwt-b"
 		disabledJWT.Issuer = "https://issuer-b.example.com"
@@ -430,22 +424,48 @@ func TestInboundAuthConfig_Validate(t *testing.T) {
 		assert.NoError(t, a.Validate())
 	})
 
-	t.Run("duplicate name across jwt and saml", func(t *testing.T) {
-		jwt := validJWTSource()
-		saml := validSAMLSource(t)
-		saml.Name = jwt.Name
-
-		a := InboundAuthConfig{JWT: []JWTSource{jwt}, SAML: &saml}
-		assert.ErrorContains(t, a.Validate(), "name")
-	})
-
-	t.Run("duplicate issuer across jwt and saml", func(t *testing.T) {
+	t.Run("duplicate issuer across jwt and saml is fine - their names still differ", func(t *testing.T) {
+		// jwt/saml's Name each already defaulted to their own (distinct)
+		// Issuer before this mutation runs, so overwriting just the
+		// Issuer afterward leaves Name unique - exactly the shape two
+		// sources sharing an issuer are expected to have (see
+		// InboundAuthConfig's doc comment).
 		jwt := validJWTSource()
 		saml := validSAMLSource(t)
 		saml.Issuer = jwt.Issuer
+		require.NotEqual(t, jwt.Name, saml.Name, "test setup: names must still differ for this case to be meaningful")
 
 		a := InboundAuthConfig{JWT: []JWTSource{jwt}, SAML: &saml}
-		assert.ErrorContains(t, a.Validate(), "issuer")
+		assert.NoError(t, a.Validate())
+	})
+
+	t.Run("two jwt sources sharing an issuer with no explicit name collide on the defaulted name", func(t *testing.T) {
+		first := validJWTSource()
+		second := JWTSource{Issuer: first.Issuer, JWKSURL: "https://other.example.com/jwks.json"}
+		second.applyDefaults()
+
+		a := InboundAuthConfig{JWT: []JWTSource{first, second}}
+		assert.ErrorContains(t, a.Validate(), "name")
+	})
+
+	t.Run("two jwt sources sharing an issuer with distinct explicit names is valid", func(t *testing.T) {
+		first := validJWTSource()
+		first.Name = "primary"
+		second := JWTSource{Name: "secondary", Issuer: first.Issuer, JWKSURL: "https://other.example.com/jwks.json"}
+		second.applyDefaults()
+
+		a := InboundAuthConfig{JWT: []JWTSource{first, second}}
+		assert.NoError(t, a.Validate())
+	})
+
+	t.Run("explicit duplicate name across jwt and saml, distinct issuers", func(t *testing.T) {
+		jwt := validJWTSource()
+		jwt.Name = "shared-name"
+		saml := validSAMLSource(t)
+		saml.Name = "shared-name"
+
+		a := InboundAuthConfig{JWT: []JWTSource{jwt}, SAML: &saml}
+		assert.ErrorContains(t, a.Validate(), "name")
 	})
 
 	t.Run("no saml source configured", func(t *testing.T) {
@@ -482,32 +502,32 @@ func TestInboundAuthConfig_Enabled(t *testing.T) {
 		{name: "zero sources", a: InboundAuthConfig{}, want: false},
 		{
 			name: "one non-disabled jwt source",
-			a:    InboundAuthConfig{JWT: []JWTSource{{Name: "j"}}},
+			a:    InboundAuthConfig{JWT: []JWTSource{{}}},
 			want: true,
 		},
 		{
 			name: "a non-disabled saml source",
-			a:    InboundAuthConfig{SAML: &SAMLSource{Name: "s"}},
+			a:    InboundAuthConfig{SAML: &SAMLSource{}},
 			want: true,
 		},
 		{
 			name: "a disabled saml source, no jwt sources",
-			a:    InboundAuthConfig{SAML: &SAMLSource{Name: "s", Disabled: true}},
+			a:    InboundAuthConfig{SAML: &SAMLSource{Disabled: true}},
 			want: false,
 		},
 		{
 			name: "every source disabled",
 			a: InboundAuthConfig{
-				JWT:  []JWTSource{{Name: "j", Disabled: true}},
-				SAML: &SAMLSource{Name: "s", Disabled: true},
+				JWT:  []JWTSource{{Disabled: true}},
+				SAML: &SAMLSource{Disabled: true},
 			},
 			want: false,
 		},
 		{
 			name: "mix of disabled and non-disabled",
 			a: InboundAuthConfig{
-				JWT:  []JWTSource{{Name: "j", Disabled: true}},
-				SAML: &SAMLSource{Name: "s", Disabled: false},
+				JWT:  []JWTSource{{Disabled: true}},
+				SAML: &SAMLSource{Disabled: false},
 			},
 			want: true,
 		},
@@ -535,24 +555,24 @@ func TestInboundAuthConfig_JWTEnabled(t *testing.T) {
 		{name: "zero sources", a: InboundAuthConfig{}, want: false},
 		{
 			name: "one non-disabled jwt source",
-			a:    InboundAuthConfig{JWT: []JWTSource{{Name: "j"}}},
+			a:    InboundAuthConfig{JWT: []JWTSource{{}}},
 			want: true,
 		},
 		{
 			name: "all jwt sources disabled",
-			a:    InboundAuthConfig{JWT: []JWTSource{{Name: "j", Disabled: true}}},
+			a:    InboundAuthConfig{JWT: []JWTSource{{Disabled: true}}},
 			want: false,
 		},
 		{
 			name: "SAML-only, enabled: Enabled() true but JWTEnabled() must stay false",
-			a:    InboundAuthConfig{SAML: &SAMLSource{Name: "s"}},
+			a:    InboundAuthConfig{SAML: &SAMLSource{}},
 			want: false,
 		},
 		{
 			name: "SAML enabled and a disabled jwt source",
 			a: InboundAuthConfig{
-				JWT:  []JWTSource{{Name: "j", Disabled: true}},
-				SAML: &SAMLSource{Name: "s"},
+				JWT:  []JWTSource{{Disabled: true}},
+				SAML: &SAMLSource{},
 			},
 			want: false,
 		},
@@ -565,7 +585,7 @@ func TestInboundAuthConfig_JWTEnabled(t *testing.T) {
 	}
 
 	t.Run("SAML-only config: Enabled true, JWTEnabled false", func(t *testing.T) {
-		a := InboundAuthConfig{SAML: &SAMLSource{Name: "s"}}
+		a := InboundAuthConfig{SAML: &SAMLSource{}}
 		assert.True(t, a.Enabled(), "a configured, non-disabled SAML source makes Enabled true")
 		assert.False(t, a.JWTEnabled(), "but must never make JWTEnabled true")
 	})
@@ -578,10 +598,10 @@ func TestInboundAuthConfig_SAMLEnabled(t *testing.T) {
 		want bool
 	}{
 		{name: "no saml source", a: InboundAuthConfig{}, want: false},
-		{name: "saml source configured, not disabled", a: InboundAuthConfig{SAML: &SAMLSource{Name: "s"}}, want: true},
+		{name: "saml source configured, not disabled", a: InboundAuthConfig{SAML: &SAMLSource{}}, want: true},
 		{
 			name: "saml source configured but disabled",
-			a:    InboundAuthConfig{SAML: &SAMLSource{Name: "s", Disabled: true}},
+			a:    InboundAuthConfig{SAML: &SAMLSource{Disabled: true}},
 			want: false,
 		},
 	}
@@ -594,6 +614,18 @@ func TestInboundAuthConfig_SAMLEnabled(t *testing.T) {
 }
 
 func TestJWTSource_ApplyDefaults(t *testing.T) {
+	t.Run("empty name defaults to issuer", func(t *testing.T) {
+		j := JWTSource{Issuer: "https://issuer.example.com"}
+		j.applyDefaults()
+		assert.Equal(t, "https://issuer.example.com", j.Name)
+	})
+
+	t.Run("explicit name survives untouched", func(t *testing.T) {
+		j := JWTSource{Name: "custom-name", Issuer: "https://issuer.example.com"}
+		j.applyDefaults()
+		assert.Equal(t, "custom-name", j.Name)
+	})
+
 	t.Run("all zero/empty fields get defaulted", func(t *testing.T) {
 		var j JWTSource
 		j.applyDefaults()
@@ -621,6 +653,18 @@ func TestJWTSource_ApplyDefaults(t *testing.T) {
 }
 
 func TestSAMLSource_ApplyDefaults(t *testing.T) {
+	t.Run("empty name defaults to issuer", func(t *testing.T) {
+		s := SAMLSource{Issuer: "https://idp.example.com/metadata"}
+		s.applyDefaults()
+		assert.Equal(t, "https://idp.example.com/metadata", s.Name)
+	})
+
+	t.Run("explicit name survives untouched", func(t *testing.T) {
+		s := SAMLSource{Name: "custom-name", Issuer: "https://idp.example.com/metadata"}
+		s.applyDefaults()
+		assert.Equal(t, "custom-name", s.Name)
+	})
+
 	t.Run("zero session_duration gets defaulted", func(t *testing.T) {
 		var s SAMLSource
 		s.applyDefaults()
@@ -646,20 +690,34 @@ func TestSAMLSource_ApplyDefaults(t *testing.T) {
 	})
 }
 
-func TestInboundAuthConfig_JWTSourceByIssuer(t *testing.T) {
-	enabled := JWTSource{Name: "enabled", Issuer: "https://enabled.example.com"}
-	disabled := JWTSource{Name: "disabled", Issuer: "https://disabled.example.com", Disabled: true}
+func TestInboundAuthConfig_JWTSourcesByIssuer(t *testing.T) {
+	enabled := JWTSource{Issuer: "https://enabled.example.com"}
+	disabled := JWTSource{Issuer: "https://disabled.example.com", Disabled: true}
 	a := InboundAuthConfig{JWT: []JWTSource{enabled, disabled}}
 
-	got, ok := a.JWTSourceByIssuer("https://enabled.example.com")
-	require.True(t, ok)
-	assert.Equal(t, "enabled", got.Name)
+	got := a.JWTSourcesByIssuer("https://enabled.example.com")
+	require.Len(t, got, 1)
+	assert.Equal(t, "https://enabled.example.com", got[0].Issuer)
 
-	_, ok = a.JWTSourceByIssuer("https://unknown.example.com")
-	assert.False(t, ok)
+	assert.Empty(t, a.JWTSourcesByIssuer("https://unknown.example.com"))
+	assert.Empty(t, a.JWTSourcesByIssuer("https://disabled.example.com"), "a disabled source's issuer must not be found")
+}
 
-	_, ok = a.JWTSourceByIssuer("https://disabled.example.com")
-	assert.False(t, ok, "a disabled source's issuer must not be found")
+// TestInboundAuthConfig_JWTSourcesByIssuer_MultipleShareOneIssuer is the
+// concrete proof that two sources sharing an Issuer (see
+// InboundAuthConfig's doc comment for why that's supported) are both
+// returned, in the order they appear in config - not just the first
+// match, and not deduplicated.
+func TestInboundAuthConfig_JWTSourcesByIssuer_MultipleShareOneIssuer(t *testing.T) {
+	first := JWTSource{Name: "primary", Issuer: "https://idp.example.com", JWKSURL: "https://a.example.com/jwks.json"}
+	second := JWTSource{Name: "secondary", Issuer: "https://idp.example.com", JWKSURL: "https://b.example.com/jwks.json"}
+	other := JWTSource{Issuer: "https://other.example.com"}
+	a := InboundAuthConfig{JWT: []JWTSource{first, other, second}}
+
+	got := a.JWTSourcesByIssuer("https://idp.example.com")
+	require.Len(t, got, 2)
+	assert.Equal(t, "primary", got[0].Name, "returned in config order")
+	assert.Equal(t, "secondary", got[1].Name)
 }
 
 // testBasicHash is cached per process for the same reason testSPRSAKey
@@ -819,4 +877,41 @@ func TestInboundAuthConfig_Validate_BasicCollidesWithPrefixlessJWTHeader(t *test
 	j.Credentials = []CredentialLocation{{Location: "header", Name: "Authorization"}}
 	a = InboundAuthConfig{JWT: []JWTSource{j}, Basic: &disabled}
 	require.NoError(t, a.Validate())
+}
+
+// TestInboundAuthConfig_JWTSourcesByIssuer_SingleMatchIsAllocationFree
+// is the concrete proof for the fast path's whole reason to exist: the
+// single-match case reslices into a.JWT's own backing array instead of
+// building a fresh one.
+func TestInboundAuthConfig_JWTSourcesByIssuer_SingleMatchIsAllocationFree(t *testing.T) {
+	a := InboundAuthConfig{JWT: []JWTSource{
+		{Issuer: "https://a.example.com"},
+		{Issuer: "https://b.example.com"},
+		{Issuer: "https://c.example.com"},
+	}}
+
+	allocs := testing.AllocsPerRun(1000, func() {
+		got := a.JWTSourcesByIssuer("https://b.example.com")
+		if len(got) != 1 {
+			t.Fatal("expected exactly one match")
+		}
+	})
+	assert.Zero(t, allocs, "single-match lookup should not allocate")
+}
+
+// TestInboundAuthConfig_JWTSourcesByIssuer_SingleMatchAliasesConfig is
+// the flip side of the allocation-free fast path: the returned slice
+// really is a view into a.JWT, not a copy - documented as safe because
+// InboundAuthConfig is never mutated after construction, but worth
+// pinning down concretely so that invariant can't silently drift.
+func TestInboundAuthConfig_JWTSourcesByIssuer_SingleMatchAliasesConfig(t *testing.T) {
+	a := InboundAuthConfig{JWT: []JWTSource{
+		{Issuer: "https://a.example.com", Name: "original"},
+	}}
+
+	got := a.JWTSourcesByIssuer("https://a.example.com")
+	require.Len(t, got, 1)
+	got[0].Name = "mutated-through-the-alias"
+
+	assert.Equal(t, "mutated-through-the-alias", a.JWT[0].Name, "the single-match result must alias a.JWT, not copy it")
 }

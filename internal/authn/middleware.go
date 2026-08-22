@@ -36,6 +36,14 @@ const (
 // SAML, or JWT's own no-credential 401) is the caller's decision, not
 // this function's. Assumes cfg.Inbound.Auth.JWTEnabled(); callers must
 // check that themselves before calling.
+//
+// A token's iss can match more than one configured source (see
+// JWTSourcesByIssuer) — when it does, each is tried in turn until one
+// fully verifies the token, or all of them have failed. If every
+// candidate fails, the reported reason isn't simply whichever was tried
+// last: a reasonKeysUnavailable failure on any candidate always wins the
+// report over an ordinary verification failure on another (see the
+// candidate loop below for why).
 func enforceJWT(w http.ResponseWriter, r *http.Request, cfg *config.Config, reg *Registry, logger *slog.Logger) jwtOutcome {
 	raw, ok := extractToken(r, cfg.Inbound.Auth)
 	if !ok {
@@ -49,24 +57,55 @@ func enforceJWT(w http.ResponseWriter, r *http.Request, cfg *config.Config, reg 
 	}
 	loggedIss := truncate(iss, maxLoggedIssuerLen)
 
-	src, ok := cfg.Inbound.Auth.JWTSourceByIssuer(iss)
-	if !ok {
+	candidates := cfg.Inbound.Auth.JWTSourcesByIssuer(iss)
+	if len(candidates) == 0 {
 		reject(w, logger, r, reasonUnknownIssuer, "issuer", loggedIss)
 		return jwtRejected
 	}
 
-	kf, err := reg.Keyfunc(r.Context(), src)
-	if err != nil {
-		reject(w, logger, r, reasonKeysUnavailable, "source", src.Name, "err", err)
-		return jwtRejected
+	// More than one candidate means multiple sources deliberately share
+	// this issuer (see InboundAuthConfig's doc comment) - try each in
+	// config order, moving on only if the previous one's entire
+	// verification failed, and stopping at the first full success.
+	//
+	// What gets reported if every candidate fails isn't simply "the
+	// last one tried": a reasonKeysUnavailable failure (the configured
+	// JWKS/discovery endpoint is unreachable - an operator problem, not
+	// a token problem) always wins over a routine verification failure
+	// (bad signature, expired, ...) on some other candidate, and the
+	// *first* source to hit it is what's kept. Without that priority, a
+	// down endpoint - during exactly the JWKS/CA migration this feature
+	// exists for - could go unnoticed: its Warn-level log line would
+	// only ever surface when it happened to be the last candidate
+	// tried, silently losing that visibility the moment a request also
+	// exercises a working sibling source afterward.
+	var reportReason reason
+	var reportArgs []any
+	haveKeysUnavailable := false
+	for _, src := range candidates {
+		kf, err := reg.Keyfunc(r.Context(), src)
+		if err != nil {
+			if !haveKeysUnavailable {
+				reportReason = reasonKeysUnavailable
+				reportArgs = []any{"source", src.Name, "err", err}
+				haveKeysUnavailable = true
+			}
+			continue
+		}
+
+		if _, err := verify(raw, src, kf); err != nil {
+			if !haveKeysUnavailable {
+				reportReason = classify(err)
+				reportArgs = []any{"source", src.Name}
+			}
+			continue
+		}
+
+		return jwtAllowed
 	}
 
-	if _, err := verify(raw, src, kf); err != nil {
-		reject(w, logger, r, classify(err), "source", src.Name)
-		return jwtRejected
-	}
-
-	return jwtAllowed
+	reject(w, logger, r, reportReason, reportArgs...)
+	return jwtRejected
 }
 
 // NewMiddleware returns a middleware enforcing Basic, JWT and/or SAML

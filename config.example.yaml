@@ -70,6 +70,19 @@ timeouts:
 # inbound:
 #   auth:
 #     jwt:
+#       # name identifies a source in logs/errors and defaults to its
+#       # own issuer if omitted - only worth setting explicitly once two
+#       # sources deliberately share an issuer, e.g. rolling a JWKS/CA
+#       # migration:
+#       #   - name: partner-oidc-old
+#       #     issuer: "https://partner.example.com"
+#       #     jwks_url: "https://old.partner.example.com/jwks.json"
+#       #   - name: partner-oidc-new
+#       #     issuer: "https://partner.example.com"
+#       #     jwks_url: "https://new.partner.example.com/jwks.json"
+#       # Both are tried, in order, for a token claiming that issuer -
+#       # the first to fully verify it wins.
+#       #
 #       # algorithms/credentials both omitted here — they default to
 #       # ["RS256"] and [{header, Authorization, "Bearer "}] respectively.
 #       - name: internal-k8s

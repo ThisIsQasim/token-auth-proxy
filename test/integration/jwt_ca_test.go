@@ -74,8 +74,7 @@ target: %q
 inbound:
   auth:
     jwt:
-      - name: idp
-        issuer: %q
+      - issuer: %q
         jwks_url: %q
 %s`, backendURL, idp.Issuer, idp.JWKSURL, caCertYAML)
 }
@@ -169,8 +168,7 @@ target: %q
 inbound:
   auth:
     jwt:
-      - name: idp
-        issuer: %q
+      - issuer: %q
         oidc_discovery_url: %q
 %s`, backend.URL, idp.Issuer, idp.DiscoveryURL, inlineCACert(idp.CACertPEM(t))))
 

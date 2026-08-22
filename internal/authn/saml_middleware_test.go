@@ -32,7 +32,6 @@ func newTestSAMLMiddleware(t *testing.T) (mw *samlsp.Middleware, src config.SAML
 
 	idp := NewTestSAMLIDP(t)
 	src = config.SAMLSource{
-		Name:                 "test-saml",
 		Issuer:               idp.Issuer,
 		IDPMetadataURL:       idp.MetadataURL,
 		IDPMetadataCacheTTL:  time.Minute,
@@ -261,7 +260,6 @@ func TestSAMLFullRoundTrip_EncryptedAssertion_DecryptsAndAuthenticates(t *testin
 
 	idp := NewTestSAMLIDP(t)
 	src := config.SAMLSource{
-		Name:                 "test-saml-enc",
 		Issuer:               idp.Issuer,
 		IDPMetadataURL:       idp.MetadataURL,
 		IDPMetadataCacheTTL:  time.Minute,

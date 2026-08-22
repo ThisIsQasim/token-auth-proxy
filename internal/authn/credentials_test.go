@@ -110,7 +110,6 @@ func TestExtractToken(t *testing.T) {
 	t.Run("ordering: second location wins when first is unpopulated", func(t *testing.T) {
 		auth := config.InboundAuthConfig{
 			JWT: []config.JWTSource{{
-				Name: "a",
 				Credentials: []config.CredentialLocation{
 					{Location: "header", Name: "Authorization", Prefix: "Bearer "},
 					{Location: "cookie", Name: "session"},
@@ -128,7 +127,6 @@ func TestExtractToken(t *testing.T) {
 	t.Run("ordering: first location wins when both populated", func(t *testing.T) {
 		auth := config.InboundAuthConfig{
 			JWT: []config.JWTSource{{
-				Name: "a",
 				Credentials: []config.CredentialLocation{
 					{Location: "header", Name: "Authorization", Prefix: "Bearer "},
 					{Location: "cookie", Name: "session"},
@@ -147,7 +145,6 @@ func TestExtractToken(t *testing.T) {
 	t.Run("a location that exists but fails its prefix check doesn't stop the search", func(t *testing.T) {
 		auth := config.InboundAuthConfig{
 			JWT: []config.JWTSource{{
-				Name: "a",
 				Credentials: []config.CredentialLocation{
 					{Location: "header", Name: "Authorization", Prefix: "Bearer "},
 					{Location: "cookie", Name: "session"},
@@ -167,11 +164,9 @@ func TestExtractToken(t *testing.T) {
 		auth := config.InboundAuthConfig{
 			JWT: []config.JWTSource{
 				{
-					Name:        "a",
 					Credentials: []config.CredentialLocation{{Location: "header", Name: "Authorization", Prefix: "Bearer "}},
 				},
 				{
-					Name:        "b",
 					Credentials: []config.CredentialLocation{{Location: "cookie", Name: "b_session"}},
 				},
 			},
@@ -187,7 +182,6 @@ func TestExtractToken(t *testing.T) {
 	t.Run("disabled source's credentials are never consulted", func(t *testing.T) {
 		auth := config.InboundAuthConfig{
 			JWT: []config.JWTSource{{
-				Name:        "a",
 				Disabled:    true,
 				Credentials: []config.CredentialLocation{{Location: "cookie", Name: "session"}},
 			}},

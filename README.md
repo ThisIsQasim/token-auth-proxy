@@ -160,24 +160,33 @@ over; see below for how the two combine.
   wins — it defaults to the `Authorization` header if omitted.
 - **Routing**: the token's own (unverified) `iss` claim selects which
   configured source's keys and policy to verify under — never any other
-  unverified field.
+  unverified field. Usually one source per issuer, but more than one
+  is allowed (e.g. rolling a JWKS/CA migration): they're tried in the
+  order they're listed, and the first to fully verify the token wins.
+  Each source is identified by `name`, which defaults to its own
+  `issuer` and only needs setting explicitly once two sources share
+  one.
 - **Key material**: a `jwks_url` or `oidc_discovery_url` (exactly one).
   An OIDC discovery document's `jwks_uri` is resolved once and then
   treated exactly like a directly configured `jwks_url`; the
   document's `issuer` must match the source's configured `issuer`, and
   its advertised signing algorithms are never consulted.
 - **TLS trust for those endpoints**: `ca_cert`, an optional PEM CA
-  bundle used to verify the certificate presented by `jwks_url` /
-  `oidc_discovery_url` (and the `jwks_uri` a discovery document
-  resolves to). It **replaces** the system trust store for this source
-  rather than adding to it, so pinning the wrong bundle fails the fetch
-  instead of quietly falling back to public trust. It covers key
-  material only — the backend and the SAML IdP metadata fetch are
-  unaffected. Write `ca_cert: "${file:/path/to/ca.crt}"`
+  bundle (or that same PEM, base64-encoded — handy for pasting inline
+  into `--inbound-auth-jwt-json`/`TAP_INBOUND_AUTH_JWT_JSON`, which
+  have no `${file:...}` support and no YAML block-scalar syntax to
+  carry raw PEM's newlines) used to verify the certificate presented by
+  `jwks_url` / `oidc_discovery_url` (and the `jwks_uri` a discovery
+  document resolves to). It **replaces** the system trust store for
+  this source rather than adding to it, so pinning the wrong bundle
+  fails the fetch instead of quietly falling back to public trust. It
+  covers key material only — the backend and the SAML IdP metadata
+  fetch are unaffected. Write `ca_cert: "${file:/path/to/ca.crt}"`
   ([value references](#value-references-env--file)) to load it from a
   mounted file; a rotated CA takes effect on the next reload. Setting it
   on an `http://` endpoint is a config error, since it would never be
-  used.
+  used. An invalid `ca_cert` (bad PEM, bad base64, or content that
+  isn't a certificate) fails the config load.
 - **Verification**: signature under one of `algorithms` (defaults to
   `["RS256"]` — this list is always authoritative, never the token's own
   `alg` header or anything a JWKS/discovery document claims about

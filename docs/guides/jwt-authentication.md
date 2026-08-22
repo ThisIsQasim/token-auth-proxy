@@ -132,6 +132,32 @@ Pull one source out of rotation (or stage it before going live) with
 `disabled: true` — no need to delete it, and it hot-reloads like
 everything else here.
 
+`name` identifies a source in logs/errors and defaults to its own
+`issuer` if you don't set it — no need to write it down for the common
+case above. It's only required to be explicit once two sources
+deliberately share an `issuer`, e.g. rolling a JWKS/CA migration:
+
+```yaml
+inbound:
+  auth:
+    jwt:
+      - name: partner-oidc-old
+        issuer: "https://partner.example.com"
+        jwks_url: "https://old.partner.example.com/jwks.json"
+      - name: partner-oidc-new
+        issuer: "https://partner.example.com"
+        jwks_url: "https://new.partner.example.com/jwks.json"
+```
+
+Both are tried, in the order listed, for a token claiming that
+issuer — the first one to fully verify it wins. If every source
+sharing the issuer fails, the logged reason isn't simply whichever
+source was tried last: a source whose JWKS/discovery endpoint was
+unreachable always takes priority in the log line over one that
+reached the token and rejected it normally (bad signature, expired,
+...) — exactly the case worth an operator's attention during a
+migration like this one.
+
 For two concrete, worked examples of this — trusting several
 Kubernetes clusters at once, and trusting GitHub Actions' own OIDC
 issuer — see the [Kubernetes guide](kubernetes-tokens.md) and the
@@ -170,6 +196,11 @@ token verification. Inline PEM works too:
           MIIC...
           -----END CERTIFICATE-----
 ```
+
+Setting it via `--inbound-auth-jwt-json`/`TAP_INBOUND_AUTH_JWT_JSON`
+instead? Neither of those get `${file:...}` or YAML's block-scalar
+newlines, so base64 the PEM first (`cat ca.crt | base64`) and paste
+the result as `ca_cert` — it's accepted the same as raw PEM.
 
 It applies to that source's `jwks_url`/`oidc_discovery_url` only, and
 replaces the system trust store for them — with `ca_cert` set, a

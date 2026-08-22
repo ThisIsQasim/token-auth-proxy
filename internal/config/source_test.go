@@ -155,7 +155,7 @@ func TestResolve_NeitherConfigNorTargetErrors(t *testing.T) {
 	require.Error(t, err)
 }
 
-const jwtSourceJSON = `[{"name":"jwt-a","issuer":"https://issuer.example.com","jwks_url":"https://issuer.example.com/jwks.json","credentials":[{"location":"header","name":"Authorization","prefix":"Bearer "},{"location":"cookie","name":"session"}]}]`
+const jwtSourceJSON = `[{"issuer":"https://issuer.example.com","jwks_url":"https://issuer.example.com/jwks.json","credentials":[{"location":"header","name":"Authorization","prefix":"Bearer "},{"location":"cookie","name":"session"}]}]`
 
 func TestResolve_JSONFieldOverride_EnvOnly_NoFile(t *testing.T) {
 	t.Setenv("TAP_TARGET", "http://static:9000")
@@ -168,7 +168,6 @@ func TestResolve_JSONFieldOverride_EnvOnly_NoFile(t *testing.T) {
 
 	require.Len(t, src.Config.Inbound.Auth.JWT, 1)
 	j := src.Config.Inbound.Auth.JWT[0]
-	assert.Equal(t, "jwt-a", j.Name)
 	assert.Equal(t, "https://issuer.example.com", j.Issuer)
 	require.Len(t, j.Credentials, 2)
 	assert.Equal(t, CredentialLocation{Location: "header", Name: "Authorization", Prefix: "Bearer "}, j.Credentials[0])
@@ -177,14 +176,14 @@ func TestResolve_JSONFieldOverride_EnvOnly_NoFile(t *testing.T) {
 
 func TestLoadLayered_JSONFieldOverride_FlagWinsOverEnv(t *testing.T) {
 	path := writeTempFile(t, "target: http://from-file:9000\n")
-	t.Setenv("TAP_INBOUND_AUTH_JWT_JSON", `[{"name":"from-env","issuer":"https://env.example.com","jwks_url":"https://env.example.com/jwks.json"}]`)
+	t.Setenv("TAP_INBOUND_AUTH_JWT_JSON", `[{"issuer":"https://env.example.com","jwks_url":"https://env.example.com/jwks.json"}]`)
 
-	fs := newFlagSet(t, "--inbound-auth-jwt-json", `[{"name":"from-flag","issuer":"https://flag.example.com","jwks_url":"https://flag.example.com/jwks.json"}]`)
+	fs := newFlagSet(t, "--inbound-auth-jwt-json", `[{"issuer":"https://flag.example.com","jwks_url":"https://flag.example.com/jwks.json"}]`)
 	cfg, err := loadLayered(path, fs)
 	require.NoError(t, err)
 
 	require.Len(t, cfg.Inbound.Auth.JWT, 1)
-	assert.Equal(t, "from-flag", cfg.Inbound.Auth.JWT[0].Name, "flag must win over env")
+	assert.Equal(t, "https://flag.example.com", cfg.Inbound.Auth.JWT[0].Issuer, "flag must win over env")
 }
 
 func TestLoadLayered_JSONFieldOverride_EnvWinsOverFile_FullReplace(t *testing.T) {
@@ -193,18 +192,17 @@ target: http://from-file:9000
 inbound:
   auth:
     jwt:
-      - name: from-file
-        issuer: https://file.example.com
+      - issuer: https://file.example.com
         jwks_url: https://file.example.com/jwks.json
 `)
-	t.Setenv("TAP_INBOUND_AUTH_JWT_JSON", `[{"name":"from-env","issuer":"https://env.example.com","jwks_url":"https://env.example.com/jwks.json"}]`)
+	t.Setenv("TAP_INBOUND_AUTH_JWT_JSON", `[{"issuer":"https://env.example.com","jwks_url":"https://env.example.com/jwks.json"}]`)
 
 	fs := newFlagSet(t)
 	cfg, err := loadLayered(path, fs)
 	require.NoError(t, err)
 
 	require.Len(t, cfg.Inbound.Auth.JWT, 1, "the env override must fully replace the file's list, not merge into it")
-	assert.Equal(t, "from-env", cfg.Inbound.Auth.JWT[0].Name)
+	assert.Equal(t, "https://env.example.com", cfg.Inbound.Auth.JWT[0].Issuer)
 }
 
 func TestLoadLayered_JSONFieldOverride_AbsentLeavesFileUntouched(t *testing.T) {
@@ -213,8 +211,7 @@ target: http://from-file:9000
 inbound:
   auth:
     jwt:
-      - name: from-file
-        issuer: https://file.example.com
+      - issuer: https://file.example.com
         jwks_url: https://file.example.com/jwks.json
 `)
 	fs := newFlagSet(t) // no flag, no env
@@ -222,7 +219,7 @@ inbound:
 	require.NoError(t, err)
 
 	require.Len(t, cfg.Inbound.Auth.JWT, 1)
-	assert.Equal(t, "from-file", cfg.Inbound.Auth.JWT[0].Name)
+	assert.Equal(t, "https://file.example.com", cfg.Inbound.Auth.JWT[0].Issuer)
 }
 
 // TestLoadLayered_JSONFieldOverride_EmptyStringLeavesFileUntouched is a
@@ -241,8 +238,7 @@ target: http://from-file:9000
 inbound:
   auth:
     jwt:
-      - name: from-file
-        issuer: https://file.example.com
+      - issuer: https://file.example.com
         jwks_url: https://file.example.com/jwks.json
 `)
 	t.Setenv("TAP_INBOUND_AUTH_JWT_JSON", "")
@@ -252,7 +248,7 @@ inbound:
 	require.NoError(t, err)
 
 	require.Len(t, cfg.Inbound.Auth.JWT, 1)
-	assert.Equal(t, "from-file", cfg.Inbound.Auth.JWT[0].Name)
+	assert.Equal(t, "https://file.example.com", cfg.Inbound.Auth.JWT[0].Issuer)
 }
 
 // TestLoadLayered_JSONFieldOverride_AtPrefixIsLiteral confirms the
@@ -283,7 +279,7 @@ func TestLoadLayered_JSONFieldOverride_MalformedJSON(t *testing.T) {
 func TestLoadLayered_JSONFieldOverride_WrongShapeStillErrors(t *testing.T) {
 	path := writeTempFile(t, "target: http://from-file:9000\n")
 	// A JSON object, not an array — valid JSON, wrong shape for a list.
-	t.Setenv("TAP_INBOUND_AUTH_JWT_JSON", `{"name":"jwt-a"}`)
+	t.Setenv("TAP_INBOUND_AUTH_JWT_JSON", `{"issuer":"https://issuer.example.com"}`)
 
 	fs := newFlagSet(t)
 	_, err := loadLayered(path, fs)
@@ -293,7 +289,7 @@ func TestLoadLayered_JSONFieldOverride_WrongShapeStillErrors(t *testing.T) {
 func TestResolve_SAMLJSONFieldOverride_Object(t *testing.T) {
 	t.Setenv("TAP_TARGET", "http://static:9000")
 	t.Setenv("TAP_SAML_TEST_SESSION_KEY", validSAMLSessionKey)
-	t.Setenv("TAP_INBOUND_AUTH_SAML_JSON", `{"name":"saml-a","issuer":"https://idp.example.com/metadata","idp_metadata_url":"https://idp.example.com/metadata","sp_base_url":"https://proxy.example.com","sp_entity_id":"https://proxy.example.com/saml/metadata","acs_path":"/saml/saml-a/acs","session_cookie":"saml_a_session","session_signing_key_env":"TAP_SAML_TEST_SESSION_KEY"}`)
+	t.Setenv("TAP_INBOUND_AUTH_SAML_JSON", `{"issuer":"https://idp.example.com/metadata","idp_metadata_url":"https://idp.example.com/metadata","sp_base_url":"https://proxy.example.com","sp_entity_id":"https://proxy.example.com/saml/metadata","acs_path":"/saml/acs","session_cookie":"saml_session","session_signing_key_env":"TAP_SAML_TEST_SESSION_KEY"}`)
 
 	fs := newFlagSet(t)
 	src, err := Resolve(fs)
@@ -301,16 +297,15 @@ func TestResolve_SAMLJSONFieldOverride_Object(t *testing.T) {
 	require.NotNil(t, src.Config)
 
 	require.NotNil(t, src.Config.Inbound.Auth.SAML)
-	assert.Equal(t, "saml-a", src.Config.Inbound.Auth.SAML.Name)
 	assert.Equal(t, "https://idp.example.com/metadata", src.Config.Inbound.Auth.SAML.Issuer)
-	assert.Equal(t, "/saml/saml-a/acs", src.Config.Inbound.Auth.SAML.ACSPath)
+	assert.Equal(t, "/saml/acs", src.Config.Inbound.Auth.SAML.ACSPath)
 }
 
 func TestLoadLayered_SAMLJSONFieldOverride_WrongShapeStillErrors(t *testing.T) {
 	path := writeTempFile(t, "target: http://from-file:9000\n")
 	// A JSON array, not an object — valid JSON, wrong shape for a
 	// single optional source.
-	t.Setenv("TAP_INBOUND_AUTH_SAML_JSON", `[{"name":"saml-a"}]`)
+	t.Setenv("TAP_INBOUND_AUTH_SAML_JSON", `[{"issuer":"https://idp.example.com/metadata"}]`)
 
 	fs := newFlagSet(t)
 	_, err := loadLayered(path, fs)
@@ -381,7 +376,7 @@ func TestResolve_JSONFieldOverride_CACert(t *testing.T) {
 
 	t.Setenv("TAP_TARGET", "http://static:9000")
 	t.Setenv("TAP_INBOUND_AUTH_JWT_JSON", fmt.Sprintf(
-		`[{"name":"jwt-a","issuer":"https://issuer.example.com","jwks_url":"https://issuer.example.com/jwks.json","ca_cert":%s}]`,
+		`[{"issuer":"https://issuer.example.com","jwks_url":"https://issuer.example.com/jwks.json","ca_cert":%s}]`,
 		jsonPEM))
 
 	fs := newFlagSet(t)

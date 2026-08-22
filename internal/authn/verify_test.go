@@ -17,7 +17,6 @@ import (
 // already defaulted (algorithms/credentials filled in).
 func validJWTSource(idp *TestIDP) config.JWTSource {
 	j := config.JWTSource{
-		Name:    "test-source",
 		Issuer:  idp.Issuer,
 		JWKSURL: idp.JWKSURL,
 	}
