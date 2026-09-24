@@ -55,13 +55,14 @@ func parserFor(src config.JWTSource) *jwt.Parser {
 }
 
 // verify parses and fully validates raw under src's policy, resolving
-// signing keys via kf.
-func verify(raw string, src config.JWTSource, kf jwt.Keyfunc) (*jwt.RegisteredClaims, error) {
-	var claims jwt.RegisteredClaims
-	if _, err := parserFor(src).ParseWithClaims(raw, &claims, kf); err != nil {
+// signing keys via kf. Every claim is returned, not just the registered
+// ones, so ACL rules can match on custom claims.
+func verify(raw string, src config.JWTSource, kf jwt.Keyfunc) (jwt.MapClaims, error) {
+	claims := jwt.MapClaims{}
+	if _, err := parserFor(src).ParseWithClaims(raw, claims, kf); err != nil {
 		return nil, err
 	}
-	return &claims, nil
+	return claims, nil
 }
 
 // classify maps a golang-jwt verification error to the reason logged

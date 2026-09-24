@@ -55,7 +55,9 @@ func TestVerify_ValidToken(t *testing.T) {
 
 			claims, err := verify(raw, src, keyfuncFor(t, idp))
 			require.NoError(t, err)
-			assert.Equal(t, idp.Issuer, claims.Issuer)
+			iss, err := claims.GetIssuer()
+			require.NoError(t, err)
+			assert.Equal(t, idp.Issuer, iss)
 		})
 	}
 }

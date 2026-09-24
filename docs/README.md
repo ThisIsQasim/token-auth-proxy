@@ -33,13 +33,15 @@ SAML's login flow sends the password only to the IdP.
 
 It also has:
 
+- ACLs restricting which authenticated identities may use which
+  methods and paths. See the [ACL guide](guides/acls.md).
 - OpenTelemetry traces, metrics, and structured logs, plus an
   always-on `/metrics` endpoint. See the
   [observability guide](guides/observability.md).
 - Config hot-reload with no restart. See the
   [hot-reload guide](guides/hot-reload.md).
 
-It does one backend, one auth decision — no per-path routing, no
+It does one backend: no per-path routing, no
 request/response transformation, no multiple backends. If you need
 that, this isn't the tool for it.
 
@@ -52,6 +54,7 @@ that, this isn't the tool for it.
 - **Trusting Kubernetes service account tokens (single- or multi-cluster)?** → [Kubernetes guide](guides/kubernetes-tokens.md)
 - **Authenticating a GitHub Actions workflow?** → [GitHub Actions guide](guides/github-actions.md)
 - **Setting up SAML SSO?** → [SAML SSO guide](guides/saml-sso.md)
+- **Restricting who can use which paths?** → [ACL guide](guides/acls.md)
 - **Wiring up metrics/traces/logs?** → [Observability guide](guides/observability.md)
 - **Deploying with live config changes (e.g. in Kubernetes)?** → [Hot-reload & configuration guide](guides/hot-reload.md)
 - **Need the exact flag/env var/YAML field for something?** → the [main README](../README.md)'s Configuration, Auth, and Observability sections are the authoritative reference.

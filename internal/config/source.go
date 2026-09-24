@@ -64,9 +64,9 @@ func init() {
 	}
 }
 
-// jsonFieldSpec describes one inbound.auth field overridable via a
-// JSON-valued flag/env var — a JSON array for inbound.auth.jwt (a
-// list), a JSON object for inbound.auth.saml and inbound.auth.basic
+// jsonFieldSpec describes one structured field overridable via a
+// JSON-valued flag/env var — a JSON array for inbound.auth.jwt and acl
+// (lists), a JSON object for inbound.auth.saml and inbound.auth.basic
 // (each a single optional source). koanf's flat-key env/flag providers
 // have no way to express either shape (see loadJSONFieldOverrides' doc
 // comment for why), so these fields are deliberately kept out of
@@ -90,6 +90,8 @@ var jsonFieldSpecs = []jsonFieldSpec{
 		usage: "JSON object fully replacing inbound.auth.saml (env TAP_INBOUND_AUTH_SAML_JSON)"},
 	{koanfKey: "inbound.auth.basic", flagName: "inbound-auth-basic-json", envName: "INBOUND_AUTH_BASIC_JSON",
 		usage: "JSON object fully replacing inbound.auth.basic (env TAP_INBOUND_AUTH_BASIC_JSON)"},
+	{koanfKey: "acl", flagName: "acl-json", envName: "ACL_JSON",
+		usage: "JSON array fully replacing acl (env TAP_ACL_JSON)"},
 }
 
 // RegisterFlags registers every recognized flag on fs with a zero-value
@@ -141,6 +143,12 @@ func flagKey(fs *pflag.FlagSet) func(f *pflag.Flag) (string, any) {
 // Watcher's initial load and every subsequent reload, and the static
 // flags/env path in Resolve.
 func decode(k *koanf.Koanf) (*Config, error) {
+	// Unknown keys are otherwise ignored, and an ACL nested under inbound
+	// would silently leave every request allowed.
+	if k.Exists("inbound.acl") {
+		return nil, fmt.Errorf("invalid config: inbound.acl is not a config key; acl belongs at the top level")
+	}
+
 	var cfg Config
 	if err := k.UnmarshalWithConf("", &cfg, koanf.UnmarshalConf{Tag: "yaml"}); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)

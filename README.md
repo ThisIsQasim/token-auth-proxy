@@ -5,9 +5,10 @@ A minimal HTTP reverse proxy built on Go's standard library (`net/http` /
 target, configured via a YAML file (with hot-reload), CLI flags, and/or
 environment variables. It can check inbound HTTP Basic credentials,
 verify JWT bearer tokens, and/or enforce an interactive SAML SP login
-before forwarding (see [Auth](#auth) below) — there's still no per-path
-routing, every request goes to the same `target` regardless of which
-auth mode (if any) it satisfied.
+before forwarding (see [Auth](#auth) below), and restrict which
+authenticated identities may use which methods and paths (see
+[Authorization (ACLs)](#authorization-acls)). There's still no per-path
+routing: every allowed request goes to the same `target`.
 
 📖 **New here?** This README is the exhaustive technical reference. For
 an introduction, example use cases, a getting-started walkthrough, and
@@ -34,9 +35,9 @@ task-oriented guides (Basic, JWT, SAML, hot-reload, observability), see
 - `listen_addr` and `timeouts` are the only fields that *don't*
   hot-reload: they're read once, when the listener/transport are built
   at startup, so a later file change to those is logged as requiring a
-  restart, not silently ignored. Everything else — `target` and
-  `inbound.auth` (the trusted Basic/JWT/SAML sources — see
-  [Auth](#auth) below) — hot-reloads at runtime.
+  restart, not silently ignored. Everything else hot-reloads at
+  runtime: `target`, `inbound.auth` (the trusted Basic/JWT/SAML
+  sources, see [Auth](#auth) below) and `acl`.
 - A malformed or invalid config write is logged and discarded — the
   previously loaded config stays live, so a transient bad write never
   takes the proxy down.
@@ -64,6 +65,7 @@ for the file form:
 | `--inbound-auth-jwt-json` | `TAP_INBOUND_AUTH_JWT_JSON` | `inbound.auth.jwt` | *(none — file's list, if any, passes through)* |
 | `--inbound-auth-saml-json` | `TAP_INBOUND_AUTH_SAML_JSON` | `inbound.auth.saml` | *(none — file's source, if any, passes through)* |
 | `--inbound-auth-basic-json` | `TAP_INBOUND_AUTH_BASIC_JSON` | `inbound.auth.basic` | *(none — file's source, if any, passes through)* |
+| `--acl-json` | `TAP_ACL_JSON` | `acl` | *(none; the file's rules, if any, pass through)* |
 
 A no-file, flags-only run, for example:
 
@@ -396,6 +398,75 @@ default. Any existing SAML source config predating this needs it added
 — previously a SAML source only affected config validation, so this
 couldn't have been silently relied upon before.
 
+## Authorization (ACLs)
+
+`acl` is a top-level list of rules, a sibling of `target` and `inbound`.
+It decides which authenticated identities may use which methods and
+paths.
+
+```yaml
+acl:
+  - principals:
+      - mode: basic
+        subject: ingest
+    methods:
+      - POST
+    paths:
+      - /api/v1/push
+  - principals:
+      - mode: jwt
+        source: github
+        claims:
+          repository_owner: my-org
+      - mode: saml
+        claims:
+          groups: admins
+    methods:
+      - GET
+    paths:
+      - /prometheus/*
+```
+
+- **No `acl` (or an empty one) allows everything** that passes
+  authentication, exactly as if ACLs didn't exist.
+- **With any rule, the default is deny.** A request is allowed if at
+  least one rule matches it, and otherwise gets `403 forbidden`. A
+  request that fails authentication still gets its usual `401` (or SAML
+  redirect); ACLs only ever apply after authentication succeeds.
+- **A rule matches** when its method, its path and at least one of its
+  principals all match.
+  - `methods`: any of the listed methods, case-insensitive. `*` matches
+    every method. Omitted means every method.
+  - `paths`: an exact path, or a prefix when it ends in `/*` (`/x/*`
+    matches `/x/` and `/x/a/b`, not `/x` or `/xy`). Omitted means every
+    path.
+- **A principal matches** when its `mode` matches the auth mode that
+  authenticated the request and every other field it sets matches:
+  - `subject`: the Basic username, the JWT `sub` claim, or the SAML
+    NameID.
+  - `source`: the `name` of the JWT source that verified the token
+    (`jwt` only).
+  - `claims`: JWT claims or SAML attributes (not available for `basic`).
+    A value matches a claim equal to it, or an array claim containing
+    it. Numbers and booleans compare by their written form (`"42"`,
+    `"true"`). Only top-level claims are matched.
+- **Paths must be clean.** While any rule exists, a request path
+  containing `..`, `.` or `//` segments, or an encoded slash (`%2F`),
+  gets a `403`, since the backend might resolve it differently from the
+  path the rules were matched against.
+- **Mistakes fail the load, not the request.** An unknown `mode`, a
+  `source` that isn't a configured JWT source, a Basic `subject` that
+  isn't a configured user, a principal with only `mode`, or a malformed
+  method or path is a config error, and on hot-reload the previous
+  config stays live.
+- The SAML ACS path is never subject to ACLs, so login keeps working.
+- With no auth mode enabled at all, a non-empty `acl` denies every
+  request.
+- Denials log `reason=acl_denied` with the mode, source, subject,
+  method and path, and count toward
+  `authn_rejections_total{reason="acl_denied"}`. The subject is never a
+  metric label.
+
 ## Observability
 
 - **`GET /metrics`** is always mounted, unauthenticated, in Prometheus
@@ -422,7 +493,7 @@ couldn't have been silently relied upon before.
   always live) attributed by the same rejection reason already used in
   structured logs (`no_credential`, `bad_signature`, `expired`,
   `keys_unavailable`, `bad_credential`, `saml_metadata_unavailable`,
-  ...). Generic HTTP metrics can't tell you *why* a request got a
+  `acl_denied`, ...). Generic HTTP metrics can't tell you *why* a request got a
   401/403/503; this can.
 - Logs stay the same stdout JSON either way (`slog`); when trace export
   is configured, request-scoped log lines additionally carry

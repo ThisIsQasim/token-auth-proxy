@@ -38,7 +38,7 @@ type TimeoutConfig struct {
 // ListenAddr and Timeouts are the only fields that don't hot-reload:
 // they're consumed once at startup to build the listener and outbound
 // transport, so changing them requires a process restart. Every other
-// field (Target, Inbound.Auth) hot-reloads while the process is
+// field (Target, Inbound.Auth, ACL) hot-reloads while the process is
 // running — see Watcher.reload, which detects a hot-reloadable change
 // by excluding just these two fields rather than enumerating the rest,
 // so a future field added here needs no matching update there.
@@ -48,6 +48,7 @@ type Config struct {
 	Timeouts   TimeoutConfig  `yaml:"timeouts,omitempty"`
 	Inbound    InboundConfig  `yaml:"inbound,omitempty"`
 	Outbound   OutboundConfig `yaml:"outbound,omitempty"`
+	ACL        []ACLRule      `yaml:"acl,omitempty"`
 
 	targetURL *url.URL
 }
@@ -76,6 +77,7 @@ func (c *Config) applyDefaults() {
 		c.Timeouts.ResponseHeader = defaultResponseHeaderTimeout
 	}
 	c.Inbound.applyDefaults()
+	applyACLDefaults(c.ACL)
 }
 
 // Validate checks the config for correctness and, on success, caches the
@@ -95,6 +97,10 @@ func (c *Config) Validate() error {
 	}
 
 	if err := c.Inbound.Validate(); err != nil {
+		return err
+	}
+
+	if err := validateACL(c.ACL, c.Inbound.Auth); err != nil {
 		return err
 	}
 

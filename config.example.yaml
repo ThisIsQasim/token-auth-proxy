@@ -185,3 +185,30 @@ timeouts:
 #       #   -----END CERTIFICATE-----
 #
 # outbound: {} # reserved for later: rewriting credentials on the backend leg
+
+# Optional ACL rules, top-level. With none, every authenticated request
+# is allowed. With any, a request no rule matches gets a 403. A rule
+# matches when its method, its path and one of its principals all
+# match; omitted methods or paths match everything. See the README's
+# "Authorization (ACLs)" section.
+#
+# acl:
+#   - principals:
+#       - mode: basic          # basic | jwt | saml
+#         subject: alice       # Basic username, JWT sub, or SAML NameID
+#     methods:
+#       - POST                 # or "*" for every method
+#     paths:
+#       - /api/v1/push         # exact path
+#   - principals:
+#       - mode: jwt
+#         source: "https://accounts.example.com"   # a JWT source's name
+#         claims:
+#           groups: readers    # equal to, or an array containing, this value
+#       - mode: saml
+#         claims:
+#           groups: admins     # SAML attributes
+#     methods:
+#       - GET
+#     paths:
+#       - /prometheus/*        # prefix match

@@ -66,4 +66,9 @@ const (
 	// reason here, this is an operator problem, not a caller one; see
 	// saml_middleware.go's rejectUnavailable.
 	reasonSAMLMetadataUnavailable reason = "saml_metadata_unavailable"
+
+	// reasonACLDenied is the only 403 reason: the request authenticated
+	// (or no auth is enabled) but no ACL rule allows it, or its path isn't
+	// clean enough to match rules against safely.
+	reasonACLDenied reason = "acl_denied"
 )

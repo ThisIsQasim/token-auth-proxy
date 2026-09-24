@@ -44,23 +44,23 @@ const (
 // last: a reasonKeysUnavailable failure on any candidate always wins the
 // report over an ordinary verification failure on another (see the
 // candidate loop below for why).
-func enforceJWT(w http.ResponseWriter, r *http.Request, cfg *config.Config, reg *Registry, logger *slog.Logger) jwtOutcome {
+func enforceJWT(w http.ResponseWriter, r *http.Request, cfg *config.Config, reg *Registry, logger *slog.Logger) (jwtOutcome, *principal) {
 	raw, ok := extractToken(r, cfg.Inbound.Auth)
 	if !ok {
-		return jwtNoCredential
+		return jwtNoCredential, nil
 	}
 
 	iss, err := unverifiedIssuer(raw)
 	if err != nil {
 		reject(w, logger, r, reasonMalformedToken)
-		return jwtRejected
+		return jwtRejected, nil
 	}
 	loggedIss := truncate(iss, maxLoggedIssuerLen)
 
 	candidates := cfg.Inbound.Auth.JWTSourcesByIssuer(iss)
 	if len(candidates) == 0 {
 		reject(w, logger, r, reasonUnknownIssuer, "issuer", loggedIss)
-		return jwtRejected
+		return jwtRejected, nil
 	}
 
 	// More than one candidate means multiple sources deliberately share
@@ -93,7 +93,8 @@ func enforceJWT(w http.ResponseWriter, r *http.Request, cfg *config.Config, reg 
 			continue
 		}
 
-		if _, err := verify(raw, src, kf); err != nil {
+		claims, err := verify(raw, src, kf)
+		if err != nil {
 			if !haveKeysUnavailable {
 				reportReason = classify(err)
 				reportArgs = []any{"source", src.Name}
@@ -101,11 +102,11 @@ func enforceJWT(w http.ResponseWriter, r *http.Request, cfg *config.Config, reg 
 			continue
 		}
 
-		return jwtAllowed
+		return jwtAllowed, jwtPrincipal(src, claims)
 	}
 
 	reject(w, logger, r, reportReason, reportArgs...)
-	return jwtRejected
+	return jwtRejected, nil
 }
 
 // NewMiddleware returns a middleware enforcing Basic, JWT and/or SAML
@@ -155,6 +156,10 @@ func enforceJWT(w http.ResponseWriter, r *http.Request, cfg *config.Config, reg 
 //     credential" 401, carrying a challenge for each enabled mode.
 //  6. Nothing enabled: pass through untouched.
 //
+// Whenever a leg allows a request (steps 2 to 4, and 6), cfg.ACL then
+// decides whether it is forwarded or gets a 403; with no ACL rules it
+// always is. The ACS path in step 1 is never subject to ACLs.
+//
 // Known, deliberate gap: step 4 redirects everything without a
 // session, including POSTs and JSON API calls, for which a 302 to an
 // HTML login page is useless and loses the request body. There's no
@@ -199,13 +204,16 @@ func NewMiddleware(source ConfigSource, jwtReg *Registry, samlReg *SAMLRegistry,
 
 			// Step 2.
 			if basicEnabled {
-				switch enforceBasic(w, r, basicSrc, basicReg, logger) {
+				outcome, username := enforceBasic(w, r, basicSrc, basicReg, logger)
+				switch outcome {
 				case basicAllowed:
 					// Forwarded byte-for-byte unchanged, like the other
 					// legs — the Authorization header included, since
 					// stripping it would break a backend that does its
 					// own thing with the same credential.
-					next.ServeHTTP(w, r)
+					if authorize(w, r, cfg.ACL, basicPrincipal(username), logger) {
+						next.ServeHTTP(w, r)
+					}
 					return
 				case basicRejected:
 					return
@@ -216,13 +224,16 @@ func NewMiddleware(source ConfigSource, jwtReg *Registry, samlReg *SAMLRegistry,
 
 			// Step 3.
 			if jwtEnabled {
-				switch enforceJWT(w, r, cfg, jwtReg, logger) {
+				outcome, p := enforceJWT(w, r, cfg, jwtReg, logger)
+				switch outcome {
 				case jwtAllowed:
 					// Forwarded byte-for-byte unchanged: no identity
 					// headers injected, no request mutation — not
 					// promised anywhere in the schema, and real scope
 					// creep to add here.
-					next.ServeHTTP(w, r)
+					if authorize(w, r, cfg.ACL, p, logger) {
+						next.ServeHTTP(w, r)
+					}
 					return
 				case jwtRejected:
 					return
@@ -238,7 +249,7 @@ func NewMiddleware(source ConfigSource, jwtReg *Registry, samlReg *SAMLRegistry,
 					rejectUnavailable(w, logger, r, reasonSAMLMetadataUnavailable, err, samlReg.retry)
 					return
 				}
-				enforceSAML(mw, next).ServeHTTP(w, r)
+				enforceSAML(mw, aclHandler(cfg.ACL, logger, next)).ServeHTTP(w, r)
 				return
 			}
 
@@ -255,8 +266,10 @@ func NewMiddleware(source ConfigSource, jwtReg *Registry, samlReg *SAMLRegistry,
 				return
 			}
 
-			// Step 6.
-			next.ServeHTTP(w, r)
+			// Step 6. No identity exists, so any ACL rule denies.
+			if authorize(w, r, cfg.ACL, nil, logger) {
+				next.ServeHTTP(w, r)
+			}
 		})
 	}
 }
@@ -279,14 +292,14 @@ const (
 // SAML, or the combined no-credential 401) is the caller's decision.
 // Assumes cfg.Inbound.Auth.BasicEnabled(); callers must check that
 // themselves before calling.
-func enforceBasic(w http.ResponseWriter, r *http.Request, src config.BasicSource, reg *BasicRegistry, logger *slog.Logger) basicOutcome {
+func enforceBasic(w http.ResponseWriter, r *http.Request, src config.BasicSource, reg *BasicRegistry, logger *slog.Logger) (basicOutcome, string) {
 	username, password, res := extractBasic(r)
 	switch res {
 	case basicAbsent:
-		return basicNoCredential
+		return basicNoCredential, ""
 	case basicMalformed:
 		rejectChallenges(w, logger, r, reasonMalformedCredential, []string{basicChallenge(src.Realm)})
-		return basicRejected
+		return basicRejected, ""
 	}
 
 	ok, err := reg.Verify(src, username, password)
@@ -295,15 +308,15 @@ func enforceBasic(w http.ResponseWriter, r *http.Request, src config.BasicSource
 		// credential one, so it gets SAML's 503 treatment rather than a
 		// 401 that would tell the client its password was wrong.
 		rejectUnavailable(w, logger, r, reasonBasicSaturated, err, reg.verifyTimeout)
-		return basicRejected
+		return basicRejected, ""
 	}
 	if !ok {
 		rejectChallenges(w, logger, r, reasonBadCredential, []string{basicChallenge(src.Realm)},
 			"user", truncate(username, maxLoggedUsernameLen))
-		return basicRejected
+		return basicRejected, ""
 	}
 
-	return basicAllowed
+	return basicAllowed, username
 }
 
 // Challenge values for the WWW-Authenticate header. Per RFC 6750 §3,

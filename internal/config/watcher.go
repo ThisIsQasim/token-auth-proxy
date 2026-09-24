@@ -222,7 +222,8 @@ func (w *Watcher) reload() {
 			"auth_enabled", next.Inbound.Auth.Enabled(),
 			"jwt_sources", len(next.Inbound.Auth.JWT),
 			"saml_configured", next.Inbound.Auth.SAML != nil,
-			"basic_configured", next.Inbound.Auth.Basic != nil)
+			"basic_configured", next.Inbound.Auth.Basic != nil,
+			"acl_rules", len(next.ACL))
 	}
 }
 
