@@ -8,11 +8,12 @@
 // process's own CPU/memory usage (via gopsutil) for the run.
 //
 // Four scenarios run back to back, sharing the same core attack logic:
-// "baseline" (no inbound.auth at all), "jwt-auth" (a real JWT source
-// enabled, a real signed bearer token attached to every request),
-// "basic-auth" (a bcrypt-hashed user at the default cost, the same
-// credential attached to every request), and "acl" (jwt-auth plus a
-// 20-rule acl whose only matching rule is the last). Kept side by side
+// "baseline" (no inbound.auth at all), "basic-auth" (a bcrypt-hashed
+// user at the default cost, the same credential attached to every
+// request), "jwt-auth" (a real JWT source enabled, a real signed bearer
+// token attached to every request), and "jwt-acl" (jwt-auth plus a
+// 20-rule acl whose only matching rule is the last; the other three run
+// with no acl at all). Kept side by side
 // deliberately, not replaced one-for-the-other: baseline alone would
 // never measure the per-request verification cost that's the whole
 // reason this proxy exists, but an auth scenario alone would lose the
@@ -27,8 +28,8 @@
 //
 // Run via `make test-load` or `go test -tags=load ./test/load/...`. Set
 // LOAD_TEST_REPORT_PATH to have each scenario's metrics written out as
-// JSON (suffixed with the scenario name, e.g. `-baseline`/`-jwt-auth`/
-// `-basic-auth`/`-acl`, so they don't overwrite each other) — CI uploads these
+// JSON (suffixed with the scenario name, e.g. `-baseline`/`-basic-auth`/
+// `-jwt-auth`/`-jwt-acl`, so they don't overwrite each other) — CI uploads these
 // as a build artifact so results are inspectable after the fact, not
 // just pass/fail.
 package load
@@ -253,12 +254,12 @@ func newBasicAuthScenario(t *testing.T) *authScenario {
 // scan rather than stopping at the first rule.
 const aclDecoyRules = 19
 
-// newACLScenario is the JWT scenario plus a top-level acl whose only
+// newJWTACLScenario is the JWT scenario plus a top-level acl whose only
 // matching rule is the last one: a source + claims match on a "/*" path,
 // the most work a principal match does. The decoys vary the mismatch
 // (subject, claim value, method, path) so no field short-circuits them
 // all the same way.
-func newACLScenario(t *testing.T) *authScenario {
+func newJWTACLScenario(t *testing.T) *authScenario {
 	idp := testutil.NewTestIDP(t)
 	token := idp.Sign(t, jwt.MapClaims{
 		"iss":    idp.Issuer,
@@ -315,7 +316,7 @@ func (a *authScenario) header() http.Header {
 // asserts on the same generous, noise-tolerant thresholds regardless of
 // scenario. reportName both labels the written report/vegeta attack and
 // (via authScenario.configYAML/header) selects whether auth is enabled.
-func runHotReloadLoadTest(t *testing.T, reportName string, auth *authScenario) {
+func runHotReloadLoadTest(t *testing.T, reportName string, auth *authScenario) vegeta.Metrics {
 	t.Helper()
 	backendA := testutil.NewBackend(t, "A")
 	backendB := testutil.NewBackend(t, "B")
@@ -396,21 +397,22 @@ func runHotReloadLoadTest(t *testing.T, reportName string, auth *authScenario) {
 	assert.LessOrEqual(t, metrics.Latencies.P99, maxP99Latency,
 		"[%s] P99 latency should stay bounded even while reloads are happening", reportName)
 	require.NotEmpty(t, samples, "[%s] expected at least one resource usage sample during the attack", reportName)
-	assert.Zero(t, metrics.StatusCodes["403"], "[%s] no request here should ever be denied by an ACL", reportName)
+	return metrics
 }
 
 func TestLoad_HotReloadUnderTraffic_Baseline(t *testing.T) {
 	runHotReloadLoadTest(t, "baseline", nil)
 }
 
-func TestLoad_HotReloadUnderTraffic_JWTAuth(t *testing.T) {
-	runHotReloadLoadTest(t, "jwt-auth", newJWTAuthScenario(t))
-}
-
 func TestLoad_HotReloadUnderTraffic_BasicAuth(t *testing.T) {
 	runHotReloadLoadTest(t, "basic-auth", newBasicAuthScenario(t))
 }
 
-func TestLoad_HotReloadUnderTraffic_ACL(t *testing.T) {
-	runHotReloadLoadTest(t, "acl", newACLScenario(t))
+func TestLoad_HotReloadUnderTraffic_JWTAuth(t *testing.T) {
+	runHotReloadLoadTest(t, "jwt-auth", newJWTAuthScenario(t))
+}
+
+func TestLoad_HotReloadUnderTraffic_JWTACL(t *testing.T) {
+	metrics := runHotReloadLoadTest(t, "jwt-acl", newJWTACLScenario(t))
+	assert.Zero(t, metrics.StatusCodes["403"], "[jwt-acl] the last rule allows every request, so none may be denied")
 }

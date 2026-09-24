@@ -100,14 +100,14 @@ jobs:
           go test -tags=load -race -timeout=120s -json ./test/load/... | tee test-results.json
       # The load test is a single pass/fail test per scenario (no
       # subtests), so dorny/test-reporter's Check below only ever says
-      # "3 passed" — correct, but tells you nothing about the numbers
+      # "4 passed" — correct, but tells you nothing about the numbers
       # that actually matter for a load test (throughput, latency
-      # percentiles, resource usage — and, since baseline and both auth
-      # scenarios run, the overhead each auth mode adds), which
+      # percentiles, resource usage — and, since baseline, the auth
+      # scenarios and the ACL scenario run, the overhead each adds), which
       # otherwise only exist inside the load-test-report-*.json
       # artifacts someone has to download and open by hand. Render them
       # side by side as one table (not one per scenario — that's the
-      # whole point of running all three: directly comparable deltas,
+      # whole point of running them together: directly comparable deltas,
       # not numbers to cross-reference by hand) straight into this job's
       # own Summary tab — jq ships preinstalled on GitHub-hosted
       # runners. Filenames are hardcoded, not globbed: they're a direct,
@@ -117,7 +117,7 @@ jobs:
       - name: Summarize load test report
         if: always()
         run: |
-          reports="load-test-report-baseline.json load-test-report-jwt-auth.json load-test-report-basic-auth.json"
+          reports="load-test-report-baseline.json load-test-report-basic-auth.json load-test-report-jwt-auth.json load-test-report-jwt-acl.json"
 
           missing=""
           for f in $reports; do

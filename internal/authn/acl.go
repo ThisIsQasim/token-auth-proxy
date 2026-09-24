@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/crewjam/saml/samlsp"
@@ -179,6 +180,9 @@ func scalarEquals(v any, want string) bool {
 		return false
 	case string:
 		return s == want
+	case float64:
+		// JSON numbers decode as float64; %v would print 1000000 as "1e+06".
+		return strconv.FormatFloat(s, 'f', -1, 64) == want
 	default:
 		return fmt.Sprint(s) == want
 	}

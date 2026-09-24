@@ -201,6 +201,23 @@ func TestMiddlewareACL_JWT(t *testing.T) {
 	assertForbidden(t, env.serve(env.jwtReq(t, http.MethodGet, "/other", env.token(t, "bot", "writers"))), env.backend, 1)
 }
 
+func TestMiddlewareACL_JWTNumericClaim(t *testing.T) {
+	env := newACLEnv(t, aclModes{jwt: true}, nil, nil)
+	env.setRules(t, []config.ACLRule{{
+		Principals: []config.ACLPrincipal{{Mode: "jwt", Claims: map[string]string{"org_id": "1000000"}}},
+	}})
+	token := func(orgID int64) string {
+		return env.jwtIDP.Sign(t, jwt.MapClaims{
+			"iss":    env.jwtIDP.Issuer,
+			"exp":    time.Now().Add(time.Hour).Unix(),
+			"org_id": orgID,
+		})
+	}
+
+	assertProxied(t, env.serve(env.jwtReq(t, http.MethodGet, "/", token(1000000))), env.backend, 1)
+	assertForbidden(t, env.serve(env.jwtReq(t, http.MethodGet, "/", token(1000001))), env.backend, 1)
+}
+
 func TestMiddlewareACL_SAML(t *testing.T) {
 	env := newACLEnv(t, aclModes{saml: true}, []config.ACLRule{{
 		Principals: []config.ACLPrincipal{{Mode: "saml", Subject: "carol@example.com", Claims: map[string]string{"groups": "admins"}}},
