@@ -56,6 +56,30 @@ operator-actionable problem, unlike the rest of the reasons, which are
 just expected background noise from scanners and misconfigured
 clients.
 
+## Grafana dashboard
+
+[`docs/dashboards/grafana.json`](../dashboards/grafana.json) is a
+ready-to-import dashboard covering inbound/outbound traffic and
+latency, `authn_rejections_total` by reason (including the
+JWKS/IdP-metadata outage query above as its own panel), and request/
+response body sizes. It prompts for a Prometheus datasource on import
+and has a `job` variable for picking which scrape target to look at.
+
+Its queries use the classic explicit-bucket histogram syntax
+otelhttp emits by default (`histogram_quantile` over `*_bucket`). If
+your scrape config converts these to native histograms (e.g.
+Prometheus's `convertClassicHistogramsToNHCB`, or a remote-write path
+that only forwards native histogram samples), those panels read as
+empty — only the bare metric name resolves, not the `_bucket`/`_sum`/
+`_count` series. Use
+[`docs/dashboards/grafana-native-histograms.json`](../dashboards/grafana-native-histograms.json)
+instead in that case: same panels, `histogram_quantile` called
+directly on the bare histogram with no `_bucket`/`by (le)`, and the
+two request-rate panels wrapped in `histogram_count()` instead of
+`rate()`-ing `_count` directly. `authn_rejections_total` is a plain
+counter, not a histogram, so its panels are identical between the two
+files.
+
 ## Traces and logs (and pushing metrics via OTLP)
 
 These are off until you configure them — no YAML/`TAP_` fields, just
