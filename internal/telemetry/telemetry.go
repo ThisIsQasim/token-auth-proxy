@@ -117,7 +117,27 @@ func Setup(ctx context.Context, baseLogger *slog.Logger) (*Providers, error) {
 	if err != nil {
 		return nil, fmt.Errorf("telemetry: build prometheus exporter: %w", err)
 	}
-	meterOpts := []metric.Option{metric.WithReader(promExp), metric.WithResource(res)}
+	meterOpts := []metric.Option{
+		metric.WithReader(promExp),
+		metric.WithResource(res),
+		// otelhttp's request-duration histograms default to a fixed set of
+		// explicit bucket boundaries, each its own Prometheus time series
+		// per label combination. Exponential (native) histogram aggregation
+		// collapses that into one sparse series per label set, and the
+		// Prometheus exporter emits it as a native histogram directly.
+		// MaxSize/MaxScale match the values OTel's own examples use: scale
+		// is auto-selected up to 20 (downscaled by the exporter to <=8 for
+		// Prometheus's native histogram format) and capped at 160 buckets.
+		metric.WithView(metric.NewView(
+			metric.Instrument{Kind: metric.InstrumentKindHistogram},
+			metric.Stream{
+				Aggregation: metric.AggregationBase2ExponentialHistogram{
+					MaxSize:  160,
+					MaxScale: 20,
+				},
+			},
+		)),
+	}
 	if otelConfigured("METRICS") {
 		reader, err := newMetricReader(ctx)
 		if err != nil {
