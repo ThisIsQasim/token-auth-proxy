@@ -36,14 +36,14 @@ inbound:
 acl:
   - principals:
       - mode: basic
-        subject: ingest
+        username: ingest
     methods:
       - POST
     paths:
       - /api/v1/push
   - principals:
       - mode: basic
-        subject: grafana
+        username: grafana
     methods:
       - GET
       - POST
@@ -60,8 +60,9 @@ curl -u grafana:... http://127.0.0.1:8080/prometheus/api/v1/query # allowed
 ## Matching on JWT claims
 
 A principal can match the JWT source that verified the token, its `sub`,
-and any top-level claims. Here any GitHub Actions workflow from `my-org`
-may deploy, and a Kubernetes service account may read:
+and any top-level claims - `sub` is just another claim, matched the same
+way as any other. Here any GitHub Actions workflow from `my-org` may
+deploy, and a Kubernetes service account may read:
 
 ```yaml
 acl:
@@ -76,7 +77,8 @@ acl:
   - principals:
       - mode: jwt
         source: cluster
-        subject: system:serviceaccount:monitoring:prometheus
+        claims:
+          sub: system:serviceaccount:monitoring:prometheus
     methods:
       - GET
 ```
@@ -84,22 +86,22 @@ acl:
 Every field a principal sets must match. A claim value matches a claim
 equal to it, or an array claim that contains it, so `groups: admins`
 matches a token carrying `"groups": ["staff", "admins"]`. SAML
-principals work the same way, with `subject` as the NameID and `claims`
-as the assertion's attributes.
+principals work the same way, with the NameID exposed as a `sub` claim
+alongside the assertion's own attributes.
 
 ## Overriding without touching the config file
 
 ```sh
 token-auth-proxy --target http://cortex:9009 \
   --inbound-auth-basic-json '{"users":[{"username":"ingest","password_hash":"$2y$12$..."}]}' \
-  --acl-json '[{"principals":[{"mode":"basic","subject":"ingest"}],"methods":["POST"],"paths":["/api/v1/push"]}]'
+  --acl-json '[{"principals":[{"mode":"basic","username":"ingest"}],"methods":["POST"],"paths":["/api/v1/push"]}]'
 ```
 
 `--acl-json` (or `TAP_ACL_JSON`) fully replaces the file's `acl`.
 
 ## Common pitfalls
 
-- **A typo fails the load.** A Basic `subject` that isn't a configured
+- **A typo fails the load.** A Basic `username` that isn't a configured
   user, or a `source` that isn't a configured JWT source's `name`, is
   rejected at startup (or on reload, keeping the previous config live)
   rather than silently never matching.

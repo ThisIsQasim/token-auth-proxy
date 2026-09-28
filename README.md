@@ -408,7 +408,7 @@ paths.
 acl:
   - principals:
       - mode: basic
-        subject: ingest
+        username: ingest
     methods:
       - POST
     paths:
@@ -442,20 +442,22 @@ acl:
     path.
 - **A principal matches** when its `mode` matches the auth mode that
   authenticated the request and every other field it sets matches:
-  - `subject`: the Basic username, the JWT `sub` claim, or the SAML
-    NameID.
+  - `username`: the Basic username (`basic` only).
   - `source`: the `name` of the JWT source that verified the token
     (`jwt` only).
-  - `claims`: JWT claims or SAML attributes (not available for `basic`).
-    A value matches a claim equal to it, or an array claim containing
-    it. Numbers and booleans compare by their written form (`"42"`,
-    `"true"`). Only top-level claims are matched.
+  - `claims`: JWT claims or SAML attributes (not available for
+    `basic`). The JWT `sub` claim and the SAML NameID are both exposed
+    as a `sub` claim, so match either with `claims: {sub: ...}` -
+    there's no separate subject field for `jwt`/`saml`. A value matches
+    a claim equal to it, or an array claim containing it. Numbers and
+    booleans compare by their written form (`"42"`, `"true"`). Only
+    top-level claims are matched.
 - **Paths must be clean.** While any rule exists, a request path
   containing `..`, `.` or `//` segments, or an encoded slash (`%2F`),
   gets a `403`, since the backend might resolve it differently from the
   path the rules were matched against.
 - **Mistakes fail the load, not the request.** An unknown `mode`, a
-  `source` that isn't a configured JWT source, a Basic `subject` that
+  `source` that isn't a configured JWT source, a Basic `username` that
   isn't a configured user, a principal with only `mode`, or a malformed
   method or path is a config error, and on hot-reload the previous
   config stays live.

@@ -171,7 +171,7 @@ func TestMiddlewareACL_NoRules_AllowsEverything(t *testing.T) {
 
 func TestMiddlewareACL_Basic(t *testing.T) {
 	env := newACLEnv(t, aclModes{basic: true}, []config.ACLRule{{
-		Principals: []config.ACLPrincipal{{Mode: "basic", Subject: "alice"}},
+		Principals: []config.ACLPrincipal{{Mode: "basic", Username: "alice"}},
 		Methods:    []string{"POST"},
 		Paths:      []string{"/api/v1/push"},
 	}}, nil)
@@ -186,10 +186,9 @@ func TestMiddlewareACL_JWT(t *testing.T) {
 	env := newACLEnv(t, aclModes{jwt: true}, nil, nil)
 	env.setRules(t, []config.ACLRule{{
 		Principals: []config.ACLPrincipal{{
-			Mode:    "jwt",
-			Source:  env.jwtIDP.Issuer,
-			Subject: "bot",
-			Claims:  map[string]string{"groups": "writers"},
+			Mode:   "jwt",
+			Source: env.jwtIDP.Issuer,
+			Claims: map[string]string{"sub": "bot", "groups": "writers"},
 		}},
 		Paths: []string{"/api/*"},
 	}})
@@ -220,7 +219,7 @@ func TestMiddlewareACL_JWTNumericClaim(t *testing.T) {
 
 func TestMiddlewareACL_SAML(t *testing.T) {
 	env := newACLEnv(t, aclModes{saml: true}, []config.ACLRule{{
-		Principals: []config.ACLPrincipal{{Mode: "saml", Subject: "carol@example.com", Claims: map[string]string{"groups": "admins"}}},
+		Principals: []config.ACLPrincipal{{Mode: "saml", Claims: map[string]string{"sub": "carol@example.com", "groups": "admins"}}},
 		Methods:    []string{"GET"},
 		Paths:      []string{"/protected"},
 	}}, nil)
@@ -237,7 +236,7 @@ func TestMiddlewareACL_SAML(t *testing.T) {
 }
 
 func TestMiddlewareACL_AuthFailuresAreNot403(t *testing.T) {
-	denyAll := []config.ACLRule{{Principals: []config.ACLPrincipal{{Mode: "basic", Subject: "alice"}}, Paths: []string{"/only-this"}}}
+	denyAll := []config.ACLRule{{Principals: []config.ACLPrincipal{{Mode: "basic", Username: "alice"}}, Paths: []string{"/only-this"}}}
 
 	env := newACLEnv(t, aclModes{basic: true, jwt: true}, denyAll, nil)
 
@@ -248,7 +247,7 @@ func TestMiddlewareACL_AuthFailuresAreNot403(t *testing.T) {
 	assertRejected(t, env.serve(httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/x", nil)), env.backend, 0, http.StatusUnauthorized, "unauthorized")
 
 	samlEnv := newACLEnv(t, aclModes{saml: true}, []config.ACLRule{{
-		Principals: []config.ACLPrincipal{{Mode: "saml", Subject: "someone-else"}},
+		Principals: []config.ACLPrincipal{{Mode: "saml", Claims: map[string]string{"sub": "someone-else"}}},
 	}}, nil)
 	redirect := samlEnv.serve(httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/x", nil))
 	assert.Equal(t, http.StatusFound, redirect.Code)
@@ -257,7 +256,7 @@ func TestMiddlewareACL_AuthFailuresAreNot403(t *testing.T) {
 
 func TestMiddlewareACL_ACSPathUnaffected(t *testing.T) {
 	env := newACLEnv(t, aclModes{saml: true}, []config.ACLRule{{
-		Principals: []config.ACLPrincipal{{Mode: "saml", Subject: "carol@example.com"}},
+		Principals: []config.ACLPrincipal{{Mode: "saml", Claims: map[string]string{"sub": "carol@example.com"}}},
 		Paths:      []string{"/protected"},
 	}}, nil)
 
@@ -267,7 +266,7 @@ func TestMiddlewareACL_ACSPathUnaffected(t *testing.T) {
 
 func TestMiddlewareACL_NoAuthWithRules_DeniesEverything(t *testing.T) {
 	env := newACLEnv(t, aclModes{}, []config.ACLRule{{
-		Principals: []config.ACLPrincipal{{Mode: "saml", Subject: "anyone"}},
+		Principals: []config.ACLPrincipal{{Mode: "saml", Claims: map[string]string{"sub": "anyone"}}},
 	}}, nil)
 
 	for _, m := range []string{http.MethodGet, http.MethodPost} {
@@ -276,8 +275,8 @@ func TestMiddlewareACL_NoAuthWithRules_DeniesEverything(t *testing.T) {
 }
 
 func TestMiddlewareACL_HotReloadFlipsDecision(t *testing.T) {
-	allowAlice := []config.ACLRule{{Principals: []config.ACLPrincipal{{Mode: "basic", Subject: "alice"}}}}
-	allowBob := []config.ACLRule{{Principals: []config.ACLPrincipal{{Mode: "basic", Subject: "bob"}}}}
+	allowAlice := []config.ACLRule{{Principals: []config.ACLPrincipal{{Mode: "basic", Username: "alice"}}}}
+	allowBob := []config.ACLRule{{Principals: []config.ACLPrincipal{{Mode: "basic", Username: "bob"}}}}
 
 	env := newACLEnv(t, aclModes{basic: true}, allowAlice, nil)
 	assertProxied(t, env.serve(env.basicReq(t, http.MethodGet, "/", "alice")), env.backend, 1)
@@ -295,7 +294,7 @@ func TestMiddlewareACL_HotReloadFlipsDecision(t *testing.T) {
 func TestMiddlewareACL_DenyLogsAndCounts(t *testing.T) {
 	logger, logs := newRecordingLogger()
 	env := newACLEnv(t, aclModes{basic: true}, []config.ACLRule{{
-		Principals: []config.ACLPrincipal{{Mode: "basic", Subject: "alice"}},
+		Principals: []config.ACLPrincipal{{Mode: "basic", Username: "alice"}},
 	}}, logger)
 
 	before := rejectionCountByReason(t, reasonACLDenied)

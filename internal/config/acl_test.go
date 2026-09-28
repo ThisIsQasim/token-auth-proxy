@@ -26,7 +26,7 @@ func TestLoad_ACLAtRoot(t *testing.T) {
 acl:
   - principals:
       - mode: basic
-        subject: alice
+        username: alice
       - mode: jwt
         source: ci
         claims:
@@ -40,7 +40,8 @@ acl:
       - /api/*
   - principals:
       - mode: saml
-        subject: carol@example.com
+        claims:
+          sub: carol@example.com
 `)
 	cfg, err := loadLayered(path, nil)
 	require.NoError(t, err)
@@ -50,7 +51,7 @@ acl:
 	assert.Equal(t, []string{"GET", "POST"}, r.Methods, "methods are uppercased by applyDefaults")
 	assert.Equal(t, []string{"/api/v1/push", "/api/*"}, r.Paths)
 	require.Len(t, r.Principals, 2)
-	assert.Equal(t, ACLPrincipal{Mode: "basic", Subject: "alice"}, r.Principals[0])
+	assert.Equal(t, ACLPrincipal{Mode: "basic", Username: "alice"}, r.Principals[0])
 	assert.Equal(t, map[string]string{"https://example.com/roles": "admin", "kubernetes.io": "x"}, r.Principals[1].Claims,
 		"claim names containing dots survive koanf's key delimiter")
 	assert.Empty(t, cfg.ACL[1].Methods, "omitted methods stay empty, meaning all methods")
@@ -62,7 +63,7 @@ func TestLoad_ACLUnderInboundRejected(t *testing.T) {
   acl:
     - principals:
         - mode: basic
-          subject: alice
+          username: alice
 `)
 	_, err := loadLayered(path, nil)
 	require.Error(t, err)
@@ -81,19 +82,21 @@ func TestLoadLayered_ACLJSONOverride(t *testing.T) {
 acl:
   - principals:
       - mode: saml
-        subject: from-file
+        claims:
+          sub: from-file
   - principals:
       - mode: saml
-        subject: from-file-2
+        claims:
+          sub: from-file-2
 `)
-	envACL := `[{"principals":[{"mode":"saml","subject":"from-env"}],"methods":["*"]}]`
-	flagACL := `[{"principals":[{"mode":"basic","subject":"alice"}],"paths":["/flag"]}]`
+	envACL := `[{"principals":[{"mode":"saml","claims":{"sub":"from-env"}}],"methods":["*"]}]`
+	flagACL := `[{"principals":[{"mode":"basic","username":"alice"}],"paths":["/flag"]}]`
 
 	t.Run("file only", func(t *testing.T) {
 		cfg, err := loadLayered(path, newFlagSet(t))
 		require.NoError(t, err)
 		require.Len(t, cfg.ACL, 2)
-		assert.Equal(t, "from-file", cfg.ACL[0].Principals[0].Subject)
+		assert.Equal(t, "from-file", cfg.ACL[0].Principals[0].Claims["sub"])
 	})
 
 	t.Run("env replaces file", func(t *testing.T) {
@@ -101,7 +104,7 @@ acl:
 		cfg, err := loadLayered(path, newFlagSet(t))
 		require.NoError(t, err)
 		require.Len(t, cfg.ACL, 1, "the override fully replaces the file's list")
-		assert.Equal(t, "from-env", cfg.ACL[0].Principals[0].Subject)
+		assert.Equal(t, "from-env", cfg.ACL[0].Principals[0].Claims["sub"])
 		assert.Equal(t, []string{"*"}, cfg.ACL[0].Methods)
 	})
 
@@ -110,12 +113,12 @@ acl:
 		cfg, err := loadLayered(path, newFlagSet(t, "--acl-json", flagACL))
 		require.NoError(t, err)
 		require.Len(t, cfg.ACL, 1)
-		assert.Equal(t, "alice", cfg.ACL[0].Principals[0].Subject)
+		assert.Equal(t, "alice", cfg.ACL[0].Principals[0].Username)
 		assert.Equal(t, []string{"/flag"}, cfg.ACL[0].Paths)
 	})
 
 	t.Run("invalid override fails the load", func(t *testing.T) {
-		t.Setenv("TAP_ACL_JSON", `[{"principals":[{"mode":"basic","subject":"nobody"}]}]`)
+		t.Setenv("TAP_ACL_JSON", `[{"principals":[{"mode":"basic","username":"nobody"}]}]`)
 		_, err := loadLayered(path, newFlagSet(t))
 		require.Error(t, err)
 	})
@@ -143,31 +146,33 @@ func principalRule(p ACLPrincipal) ACLRule {
 }
 
 func TestValidateACL(t *testing.T) {
-	alice := ACLPrincipal{Mode: "basic", Subject: "alice"}
+	alice := ACLPrincipal{Mode: "basic", Username: "alice"}
 
 	for _, tc := range []struct {
 		name    string
 		rule    ACLRule
 		wantErr string
 	}{
-		{name: "basic subject", rule: principalRule(alice)},
+		{name: "basic username", rule: principalRule(alice)},
 		{name: "jwt source only", rule: principalRule(ACLPrincipal{Mode: "jwt", Source: "ci"})},
-		{name: "jwt subject only", rule: principalRule(ACLPrincipal{Mode: "jwt", Subject: "bot"})},
+		{name: "jwt subject claim only", rule: principalRule(ACLPrincipal{Mode: "jwt", Claims: map[string]string{"sub": "bot"}})},
 		{name: "jwt claims only", rule: principalRule(ACLPrincipal{Mode: "jwt", Claims: map[string]string{"g": "x"}})},
-		{name: "saml subject", rule: principalRule(ACLPrincipal{Mode: "saml", Subject: "carol"})},
+		{name: "saml subject claim", rule: principalRule(ACLPrincipal{Mode: "saml", Claims: map[string]string{"sub": "carol"}})},
 		{name: "saml claims", rule: principalRule(ACLPrincipal{Mode: "saml", Claims: map[string]string{"groups": "admins"}})},
 		{name: "wildcard method", rule: ACLRule{Principals: []ACLPrincipal{alice}, Methods: []string{"*"}}},
 		{name: "named methods", rule: ACLRule{Principals: []ACLPrincipal{alice}, Methods: []string{"GET", "PROPFIND"}}},
 		{name: "exact and prefix paths", rule: ACLRule{Principals: []ACLPrincipal{alice}, Paths: []string{"/", "/a/b", "/a/", "/*", "/a/*"}}},
 
-		{name: "invalid mode", rule: principalRule(ACLPrincipal{Mode: "oauth", Subject: "x"}), wantErr: "mode"},
-		{name: "empty mode", rule: principalRule(ACLPrincipal{Subject: "x"}), wantErr: "mode"},
-		{name: "source on basic", rule: principalRule(ACLPrincipal{Mode: "basic", Subject: "alice", Source: "ci"}), wantErr: "source is only valid"},
+		{name: "invalid mode", rule: principalRule(ACLPrincipal{Mode: "oauth", Username: "x"}), wantErr: "mode"},
+		{name: "empty mode", rule: principalRule(ACLPrincipal{Username: "x"}), wantErr: "mode"},
+		{name: "source on basic", rule: principalRule(ACLPrincipal{Mode: "basic", Username: "alice", Source: "ci"}), wantErr: "source is only valid"},
 		{name: "source on saml", rule: principalRule(ACLPrincipal{Mode: "saml", Source: "ci"}), wantErr: "source is only valid"},
 		{name: "unknown jwt source", rule: principalRule(ACLPrincipal{Mode: "jwt", Source: "nope"}), wantErr: "does not name a configured"},
-		{name: "unknown basic user", rule: principalRule(ACLPrincipal{Mode: "basic", Subject: "mallory"}), wantErr: "not a configured inbound.auth.basic user"},
-		{name: "claims on basic", rule: principalRule(ACLPrincipal{Mode: "basic", Subject: "alice", Claims: map[string]string{"g": "x"}}), wantErr: "claims are not available"},
-		{name: "principal with only mode", rule: principalRule(ACLPrincipal{Mode: "jwt"}), wantErr: "at least one of source, subject or claims"},
+		{name: "unknown basic user", rule: principalRule(ACLPrincipal{Mode: "basic", Username: "mallory"}), wantErr: "not a configured inbound.auth.basic user"},
+		{name: "claims on basic", rule: principalRule(ACLPrincipal{Mode: "basic", Username: "alice", Claims: map[string]string{"g": "x"}}), wantErr: "claims are not available"},
+		{name: "username on jwt", rule: principalRule(ACLPrincipal{Mode: "jwt", Source: "ci", Username: "bot"}), wantErr: "username is only valid"},
+		{name: "username on saml", rule: principalRule(ACLPrincipal{Mode: "saml", Username: "carol"}), wantErr: "username is only valid"},
+		{name: "principal with only mode", rule: principalRule(ACLPrincipal{Mode: "jwt"}), wantErr: "at least one of source, username or claims"},
 		{name: "empty claim name", rule: principalRule(ACLPrincipal{Mode: "jwt", Claims: map[string]string{"": "x"}}), wantErr: "claim name"},
 		{name: "empty principals", rule: ACLRule{Methods: []string{"GET"}}, wantErr: "principals is required"},
 
@@ -197,14 +202,14 @@ func TestValidateACL(t *testing.T) {
 }
 
 func TestApplyDefaults_ACLMethodsUppercased(t *testing.T) {
-	c := aclTestConfig(ACLRule{Principals: []ACLPrincipal{{Mode: "basic", Subject: "alice"}}, Methods: []string{"get", "pAtCh"}})
+	c := aclTestConfig(ACLRule{Principals: []ACLPrincipal{{Mode: "basic", Username: "alice"}}, Methods: []string{"get", "pAtCh"}})
 	assert.Equal(t, []string{"GET", "PATCH"}, c.ACL[0].Methods)
 }
 
 func TestValidateACL_NoAuthEnabledStillLoads(t *testing.T) {
 	c := &Config{
 		Target: "http://backend:9000",
-		ACL:    []ACLRule{principalRule(ACLPrincipal{Mode: "saml", Subject: "carol"})},
+		ACL:    []ACLRule{principalRule(ACLPrincipal{Mode: "saml", Claims: map[string]string{"sub": "carol"}})},
 	}
 	c.applyDefaults()
 	require.NoError(t, c.Validate(), "a hot-reload may disable every source; that denies at runtime rather than failing the load")

@@ -11,12 +11,12 @@ import (
 )
 
 var (
-	aliceBasic = &principal{mode: config.ACLModeBasic, subject: "alice"}
+	aliceBasic = &principal{mode: config.ACLModeBasic, username: "alice"}
 	botJWT     = &principal{
-		mode:    config.ACLModeJWT,
-		source:  "ci",
-		subject: "bot",
+		mode:   config.ACLModeJWT,
+		source: "ci",
 		claims: map[string]any{
+			"sub":      "bot",
 			"groups":   []any{"writers", "readers"},
 			"team":     "infra",
 			"admin":    true,
@@ -30,9 +30,8 @@ var (
 		},
 	}
 	carolSAML = &principal{
-		mode:    config.ACLModeSAML,
-		subject: "carol@example.com",
-		claims:  map[string]any{"groups": []string{"admins"}},
+		mode:   config.ACLModeSAML,
+		claims: map[string]any{"sub": "carol@example.com", "groups": []string{"admins"}},
 	}
 )
 
@@ -40,7 +39,7 @@ func rule(p config.ACLPrincipal, methods, paths []string) config.ACLRule {
 	return config.ACLRule{Principals: []config.ACLPrincipal{p}, Methods: methods, Paths: paths}
 }
 
-var aliceRule = config.ACLPrincipal{Mode: config.ACLModeBasic, Subject: "alice"}
+var aliceRule = config.ACLPrincipal{Mode: config.ACLModeBasic, Username: "alice"}
 
 func TestACL_OmittedMethodsAndPaths(t *testing.T) {
 	for _, tc := range []struct {
@@ -100,15 +99,15 @@ func TestACL_Principals(t *testing.T) {
 		p    *principal
 		want bool
 	}{
-		{"subject only", config.ACLPrincipal{Mode: "jwt", Subject: "bot"}, botJWT, true},
-		{"subject mismatch", config.ACLPrincipal{Mode: "jwt", Subject: "other"}, botJWT, false},
+		{"subject only", config.ACLPrincipal{Mode: "jwt", Claims: map[string]string{"sub": "bot"}}, botJWT, true},
+		{"subject mismatch", config.ACLPrincipal{Mode: "jwt", Claims: map[string]string{"sub": "other"}}, botJWT, false},
 		{"source only", config.ACLPrincipal{Mode: "jwt", Source: "ci"}, botJWT, true},
 		{"source mismatch", config.ACLPrincipal{Mode: "jwt", Source: "other"}, botJWT, false},
 		{"claims only", config.ACLPrincipal{Mode: "jwt", Claims: map[string]string{"team": "infra"}}, botJWT, true},
-		{"all three combined", config.ACLPrincipal{Mode: "jwt", Source: "ci", Subject: "bot", Claims: map[string]string{"team": "infra", "groups": "writers"}}, botJWT, true},
-		{"all three, source mismatched", config.ACLPrincipal{Mode: "jwt", Source: "x", Subject: "bot", Claims: map[string]string{"team": "infra"}}, botJWT, false},
-		{"all three, subject mismatched", config.ACLPrincipal{Mode: "jwt", Source: "ci", Subject: "x", Claims: map[string]string{"team": "infra"}}, botJWT, false},
-		{"all three, one claim mismatched", config.ACLPrincipal{Mode: "jwt", Source: "ci", Subject: "bot", Claims: map[string]string{"team": "infra", "groups": "admins"}}, botJWT, false},
+		{"all three combined", config.ACLPrincipal{Mode: "jwt", Source: "ci", Claims: map[string]string{"sub": "bot", "team": "infra", "groups": "writers"}}, botJWT, true},
+		{"all three, source mismatched", config.ACLPrincipal{Mode: "jwt", Source: "x", Claims: map[string]string{"sub": "bot", "team": "infra"}}, botJWT, false},
+		{"all three, subject mismatched", config.ACLPrincipal{Mode: "jwt", Source: "ci", Claims: map[string]string{"sub": "x", "team": "infra"}}, botJWT, false},
+		{"all three, one claim mismatched", config.ACLPrincipal{Mode: "jwt", Source: "ci", Claims: map[string]string{"sub": "bot", "team": "infra", "groups": "admins"}}, botJWT, false},
 		{"claim as string", config.ACLPrincipal{Mode: "jwt", Claims: map[string]string{"team": "infra"}}, botJWT, true},
 		{"claim as array containing value", config.ACLPrincipal{Mode: "jwt", Claims: map[string]string{"groups": "readers"}}, botJWT, true},
 		{"claim as array missing value", config.ACLPrincipal{Mode: "jwt", Claims: map[string]string{"groups": "admins"}}, botJWT, false},
@@ -124,9 +123,9 @@ func TestACL_Principals(t *testing.T) {
 		{"mixed array matches a number element", config.ACLPrincipal{Mode: "jwt", Claims: map[string]string{"mixedArr": "7"}}, botJWT, true},
 		{"mixed array ignores nested arrays", config.ACLPrincipal{Mode: "jwt", Claims: map[string]string{"mixedArr": "deep"}}, botJWT, false},
 		{"saml attribute array", config.ACLPrincipal{Mode: "saml", Claims: map[string]string{"groups": "admins"}}, carolSAML, true},
-		{"saml nameid", config.ACLPrincipal{Mode: "saml", Subject: "carol@example.com"}, carolSAML, true},
-		{"basic username", config.ACLPrincipal{Mode: "basic", Subject: "alice"}, aliceBasic, true},
-		{"mode mismatch denies even when subject matches", config.ACLPrincipal{Mode: "jwt", Subject: "alice"}, aliceBasic, false},
+		{"saml nameid", config.ACLPrincipal{Mode: "saml", Claims: map[string]string{"sub": "carol@example.com"}}, carolSAML, true},
+		{"basic username", config.ACLPrincipal{Mode: "basic", Username: "alice"}, aliceBasic, true},
+		{"mode mismatch denies even when username matches", config.ACLPrincipal{Mode: "jwt", Claims: map[string]string{"sub": "alice"}}, aliceBasic, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.Equal(t, tc.want, aclAllows([]config.ACLRule{rule(tc.pr, nil, nil)}, tc.p, "GET", "/"))
@@ -137,14 +136,14 @@ func TestACL_Principals(t *testing.T) {
 func TestACL_AnyOf(t *testing.T) {
 	secondPrincipal := []config.ACLRule{{
 		Principals: []config.ACLPrincipal{
-			{Mode: "jwt", Subject: "nobody"},
-			{Mode: "basic", Subject: "alice"},
+			{Mode: "jwt", Claims: map[string]string{"sub": "nobody"}},
+			{Mode: "basic", Username: "alice"},
 		},
 	}}
 	assert.True(t, aclAllows(secondPrincipal, aliceBasic, "GET", "/"), "a later principal in a rule matches")
 
 	laterRule := []config.ACLRule{
-		rule(config.ACLPrincipal{Mode: "basic", Subject: "bob"}, nil, nil),
+		rule(config.ACLPrincipal{Mode: "basic", Username: "bob"}, nil, nil),
 		rule(aliceRule, []string{"POST"}, nil),
 		rule(aliceRule, nil, []string{"/other"}),
 		rule(aliceRule, []string{"GET"}, []string{"/ok"}),

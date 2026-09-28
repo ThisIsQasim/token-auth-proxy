@@ -29,15 +29,18 @@ type ACLRule struct {
 }
 
 // ACLPrincipal matches an authenticated identity. Every field that is set
-// must match. Subject is the Basic username, the JWT sub claim or the SAML
-// NameID. Source names a JWT source and is only valid for jwt. Claims are
-// JWT claims or SAML attributes; a value matches a claim equal to it or an
-// array claim containing it.
+// must match. Username is the Basic username and is only valid for basic.
+// Source names a JWT source and is only valid for jwt. Claims are JWT
+// claims or SAML attributes, only valid for jwt/saml; a value matches a
+// claim equal to it or an array claim containing it. There's no separate
+// subject field for jwt/saml - the JWT sub claim and the SAML NameID are
+// both exposed as the "sub" claim, so match them the same way as any
+// other claim (claims: {sub: ...}).
 type ACLPrincipal struct {
-	Mode    string            `yaml:"mode"`
-	Source  string            `yaml:"source,omitempty"`
-	Subject string            `yaml:"subject,omitempty"`
-	Claims  map[string]string `yaml:"claims,omitempty"`
+	Mode     string            `yaml:"mode"`
+	Source   string            `yaml:"source,omitempty"`
+	Username string            `yaml:"username,omitempty"`
+	Claims   map[string]string `yaml:"claims,omitempty"`
 }
 
 func applyACLDefaults(rules []ACLRule) {
@@ -97,8 +100,8 @@ func validateACLPrincipal(p ACLPrincipal, auth InboundAuthConfig) error {
 		return fmt.Errorf("mode %q must be one of %s, %s, %s", p.Mode, ACLModeBasic, ACLModeJWT, ACLModeSAML)
 	}
 
-	if p.Source == "" && p.Subject == "" && len(p.Claims) == 0 {
-		return fmt.Errorf("at least one of source, subject or claims is required")
+	if p.Source == "" && p.Username == "" && len(p.Claims) == 0 {
+		return fmt.Errorf("at least one of source, username or claims is required")
 	}
 
 	if p.Source != "" {
@@ -110,12 +113,16 @@ func validateACLPrincipal(p ACLPrincipal, auth InboundAuthConfig) error {
 		}
 	}
 
+	if p.Username != "" && p.Mode != ACLModeBasic {
+		return fmt.Errorf("username is only valid with mode %q", ACLModeBasic)
+	}
+
 	if p.Mode == ACLModeBasic {
 		if len(p.Claims) > 0 {
 			return fmt.Errorf("claims are not available for mode %q", ACLModeBasic)
 		}
-		if !basicUserExists(auth, p.Subject) {
-			return fmt.Errorf("subject %q is not a configured inbound.auth.basic user", p.Subject)
+		if !basicUserExists(auth, p.Username) {
+			return fmt.Errorf("username %q is not a configured inbound.auth.basic user", p.Username)
 		}
 	}
 

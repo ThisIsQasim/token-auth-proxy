@@ -195,7 +195,7 @@ timeouts:
 # acl:
 #   - principals:
 #       - mode: basic          # basic | jwt | saml
-#         subject: alice       # Basic username, JWT sub, or SAML NameID
+#         username: alice      # Basic username - only valid for basic
 #     methods:
 #       - POST                 # or "*" for every method
 #     paths:
@@ -204,9 +204,11 @@ timeouts:
 #       - mode: jwt
 #         source: "https://accounts.example.com"   # a JWT source's name
 #         claims:
+#           sub: alice         # the JWT sub claim - just another claim
 #           groups: readers    # equal to, or an array containing, this value
 #       - mode: saml
 #         claims:
+#           sub: alice         # the SAML NameID, exposed as a "sub" claim
 #           groups: admins     # SAML attributes
 #     methods:
 #       - GET

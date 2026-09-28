@@ -13,22 +13,24 @@ import (
 )
 
 // principal is the authenticated identity an ACL rule is matched against.
-// source is only set for JWT (the source Name that verified the token).
-// claims holds JWT claims or SAML attributes.
+// source and username are only set for JWT and Basic respectively. claims
+// holds JWT claims or SAML attributes - for both, the identity's "subject"
+// (the JWT sub claim, the SAML NameID) is folded in under the "sub" key
+// rather than kept as a separate field, so an ACLPrincipal matches it the
+// same way as any other claim.
 type principal struct {
-	mode    string
-	source  string
-	subject string
-	claims  map[string]any
+	mode     string
+	source   string
+	username string
+	claims   map[string]any
 }
 
 func basicPrincipal(username string) *principal {
-	return &principal{mode: config.ACLModeBasic, subject: username}
+	return &principal{mode: config.ACLModeBasic, username: username}
 }
 
 func jwtPrincipal(src config.JWTSource, claims map[string]any) *principal {
-	sub, _ := claims["sub"].(string)
-	return &principal{mode: config.ACLModeJWT, source: src.Name, subject: sub, claims: claims}
+	return &principal{mode: config.ACLModeJWT, source: src.Name, claims: claims}
 }
 
 func samlPrincipal(s samlsp.Session) *principal {
@@ -36,11 +38,24 @@ func samlPrincipal(s samlsp.Session) *principal {
 	if !ok {
 		return nil
 	}
-	claims := make(map[string]any, len(sc.Attributes))
+	claims := make(map[string]any, len(sc.Attributes)+1)
 	for k, v := range sc.Attributes {
 		claims[k] = v
 	}
-	return &principal{mode: config.ACLModeSAML, subject: sc.Subject, claims: claims}
+	claims["sub"] = sc.Subject
+	return &principal{mode: config.ACLModeSAML, claims: claims}
+}
+
+// identity is the best printable label for p, for logging only - never
+// used for ACL matching. Basic has no claims, so its username is the only
+// option; JWT/SAML fall back to the "sub" claim (see jwtPrincipal/
+// samlPrincipal) when it's a string.
+func (p *principal) identity() string {
+	if p.username != "" {
+		return p.username
+	}
+	sub, _ := p.claims["sub"].(string)
+	return sub
 }
 
 // authorize reports whether r may proceed under rules, writing a 403
@@ -137,7 +152,7 @@ func principalMatches(pr config.ACLPrincipal, p *principal) bool {
 	if pr.Source != "" && pr.Source != p.source {
 		return false
 	}
-	if pr.Subject != "" && pr.Subject != p.subject {
+	if pr.Username != "" && pr.Username != p.username {
 		return false
 	}
 	for name, want := range pr.Claims {
@@ -198,7 +213,7 @@ func rejectForbidden(w http.ResponseWriter, logger *slog.Logger, r *http.Request
 
 	fields := []any{"reason", string(reasonACLDenied), "method", r.Method, "path", r.URL.Path}
 	if p != nil {
-		fields = append(fields, "mode", p.mode, "subject", truncate(p.subject, maxLoggedUsernameLen))
+		fields = append(fields, "mode", p.mode, "subject", truncate(p.identity(), maxLoggedUsernameLen))
 		if p.source != "" {
 			fields = append(fields, "source", p.source)
 		}
