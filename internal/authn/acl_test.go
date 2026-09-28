@@ -151,7 +151,69 @@ func TestACL_AnyOf(t *testing.T) {
 	assert.True(t, aclAllows(laterRule, aliceBasic, "GET", "/ok"), "a later rule matches after earlier ones miss")
 	assert.False(t, aclAllows(laterRule, aliceBasic, "GET", "/nope"), "no rule matching denies")
 
+	// Alice appears in three separate rules above, each scoping a
+	// different resource - she must be able to reach every one of them,
+	// not just whichever the earlier assertions happened to check.
+	assert.True(t, aclAllows(laterRule, aliceBasic, "POST", "/anything"), "the POST-only rule also grants alice access")
+	assert.True(t, aclAllows(laterRule, aliceBasic, "DELETE", "/other"), "the /other-only rule also grants alice access")
+
 	assert.False(t, aclAllows(laterRule, nil, "GET", "/ok"), "no principal matches nothing")
+}
+
+// TestACL_DuplicateIdentityAcrossRules_Unions documents that the same
+// identity (same username, or the same claims) named in more than one
+// rule gets the union of every rule it appears in - each rule's own
+// methods/paths apply independently, there's no "last rule wins" or
+// intersection across them.
+func TestACL_DuplicateIdentityAcrossRules_Unions(t *testing.T) {
+	basicRules := []config.ACLRule{
+		rule(config.ACLPrincipal{Mode: "basic", Username: "alice"}, []string{"POST"}, []string{"/push"}),
+		rule(config.ACLPrincipal{Mode: "basic", Username: "alice"}, []string{"GET"}, []string{"/query"}),
+	}
+	assert.True(t, aclAllows(basicRules, aliceBasic, "POST", "/push"))
+	assert.True(t, aclAllows(basicRules, aliceBasic, "GET", "/query"))
+	assert.False(t, aclAllows(basicRules, aliceBasic, "DELETE", "/query"), "neither rule grants DELETE")
+
+	claimRules := []config.ACLRule{
+		rule(config.ACLPrincipal{Mode: "jwt", Claims: map[string]string{"team": "infra"}}, nil, []string{"/deploy/*"}),
+		rule(config.ACLPrincipal{Mode: "jwt", Claims: map[string]string{"team": "infra"}}, []string{"GET"}, []string{"/status"}),
+	}
+	assert.True(t, aclAllows(claimRules, botJWT, "POST", "/deploy/x"))
+	assert.True(t, aclAllows(claimRules, botJWT, "GET", "/status"))
+	assert.False(t, aclAllows(claimRules, botJWT, "GET", "/other"), "neither rule covers this path")
+}
+
+// TestACL_SamePrincipalTwiceInOneRule_Harmless documents that listing
+// the same principal twice within one rule's principals list is
+// redundant, not an error or a behavior change - anyPrincipalMatches
+// short-circuits on the first match either way.
+func TestACL_SamePrincipalTwiceInOneRule_Harmless(t *testing.T) {
+	once := []config.ACLRule{rule(config.ACLPrincipal{Mode: "basic", Username: "alice"}, nil, nil)}
+	twice := []config.ACLRule{{
+		Principals: []config.ACLPrincipal{
+			{Mode: "basic", Username: "alice"},
+			{Mode: "basic", Username: "alice"},
+		},
+	}}
+	assert.Equal(t,
+		aclAllows(once, aliceBasic, "GET", "/x"),
+		aclAllows(twice, aliceBasic, "GET", "/x"),
+		"listing the same principal twice changes nothing",
+	)
+	assert.True(t, aclAllows(twice, aliceBasic, "GET", "/x"))
+}
+
+// TestACL_UnrestrictedRuleDominatesNarrowerRuleForSameIdentity documents
+// a consequence of the union model: once any rule grants an identity
+// unrestricted access, a second, narrower rule for that same identity
+// can't scope it back down - aclAllows only ever adds access across
+// rules, never intersects it.
+func TestACL_UnrestrictedRuleDominatesNarrowerRuleForSameIdentity(t *testing.T) {
+	rules := []config.ACLRule{
+		rule(config.ACLPrincipal{Mode: "jwt", Claims: map[string]string{"team": "infra"}}, nil, []string{"/deploy/*"}),
+		rule(config.ACLPrincipal{Mode: "jwt", Claims: map[string]string{"team": "infra"}}, nil, nil),
+	}
+	assert.True(t, aclAllows(rules, botJWT, "DELETE", "/totally-unrelated"))
 }
 
 func TestAuthorize_PathHygiene(t *testing.T) {
