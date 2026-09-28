@@ -257,8 +257,8 @@ const aclDecoyRules = 19
 // newJWTACLScenario is the JWT scenario plus a top-level acl whose only
 // matching rule is the last one: a source + claims match on a "/*" path,
 // the most work a principal match does. The decoys vary the mismatch
-// (subject, claim value, method, path) so no field short-circuits them
-// all the same way.
+// (the sub claim, a different claim, method, path) so no field
+// short-circuits them all the same way.
 func newJWTACLScenario(t *testing.T) *authScenario {
 	idp := testutil.NewTestIDP(t)
 	token := idp.Sign(t, jwt.MapClaims{
@@ -273,7 +273,7 @@ func newJWTACLScenario(t *testing.T) *authScenario {
 	for i := range aclDecoyRules {
 		switch i % 4 {
 		case 0:
-			fmt.Fprintf(&acl, "  - principals:\n      - mode: jwt\n        source: load\n        subject: other-%d\n", i)
+			fmt.Fprintf(&acl, "  - principals:\n      - mode: jwt\n        source: load\n        claims:\n          sub: other-%d\n", i)
 		case 1:
 			fmt.Fprintf(&acl, "  - principals:\n      - mode: jwt\n        source: load\n        claims:\n          groups: team-%d\n", i)
 		case 2:

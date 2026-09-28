@@ -44,7 +44,7 @@ const aclAliceWritesBotReads = `
 acl:
   - principals:
       - mode: basic
-        subject: alice
+        username: alice
     methods:
       - POST
     paths:
@@ -185,7 +185,7 @@ func TestProxyACL_FromFlags(t *testing.T) {
 		"--listen-addr", ":0",
 		"--target", backend.URL,
 		"--inbound-auth-basic-json", fmt.Sprintf(`{"users":[{"username":"alice","password_hash":%q}]}`, hash),
-		"--acl-json", `[{"principals":[{"mode":"basic","subject":"alice"}],"methods":["*"],"paths":["/ok/*"]}]`,
+		"--acl-json", `[{"principals":[{"mode":"basic","username":"alice"}],"methods":["*"],"paths":["/ok/*"]}]`,
 	)
 	base := "http://" + proc.Addr
 	alice := basicHeader("alice", "hunter2")
