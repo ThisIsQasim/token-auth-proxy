@@ -766,3 +766,21 @@ func TestStale_OtherSourcesCookieIsKept(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Contains(t, resp.Header.Get("X-Seen-Cookies"), "unrelated", "only the stale login cookie is removed from the request")
 }
+
+func TestPicker_EmbeddedFont(t *testing.T) {
+	e := newLoginEnv(t, loginOpts{basic: true})
+	c := e.client(t, false)
+
+	// The built-in styles use the embedded font.
+	_, body := e.get(t, c, "/_tap/login", nil)
+	assert.Contains(t, body, `font-family: "Schibsted Grotesk Variable"`)
+	assert.Contains(t, body, `url("/_tap/login/font.woff2")`)
+
+	// The font itself is served without a credential, and cached.
+	resp, font := e.get(t, c, "/_tap/login/font.woff2", nil)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "font/woff2", resp.Header.Get("Content-Type"))
+	assert.Contains(t, resp.Header.Get("Cache-Control"), "immutable")
+	assert.Equal(t, "wOF2", font[:4])
+	assert.Zero(t, e.backend.Load())
+}

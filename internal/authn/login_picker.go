@@ -1,6 +1,7 @@
 package authn
 
 import (
+	_ "embed"
 	"encoding/base64"
 	"html/template"
 	"log/slog"
@@ -18,6 +19,15 @@ import (
 // browser only sends cached Basic credentials after a 401 challenge, and
 // the cookie is what turns the next credential-less request into one.
 const loginMethodCookie = "tap_login_method"
+
+// loginFontPath serves the embedded font the built-in styles use.
+const loginFontPath = config.LoginPathPrefix + "/font.woff2"
+
+//go:embed assets/schibsted-grotesk-latin-wght-normal.woff2
+var loginFont []byte
+
+// loginFontFace declares the embedded font as "Schibsted Grotesk Variable".
+const loginFontFace = template.CSS(`@font-face { font-family: "Schibsted Grotesk Variable"; font-style: normal; font-weight: 400 900; font-display: swap; src: url("` + loginFontPath + `") format("woff2-variations"); }`)
 
 // loginMethod is one way a browser with no credential can sign in.
 type loginMethod struct {
@@ -97,13 +107,14 @@ var pickerTmpl = template.Must(template.New("picker").Parse(`<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sign in</title>
 <style>
-:root { color-scheme: light dark; --bg: #f6f7f9; --fg: #1a1c20; --card: #fff; --line: #d5d9e0; --accent: #2b5fd9; --accent-fg: #fff; }
-@media (prefers-color-scheme: dark) { :root { --bg: #14161a; --fg: #e8eaee; --card: #1d2026; --line: #343942; --accent: #6b93f2; --accent-fg: #101319; } }
+{{.FontFace}}
+:root { color-scheme: light dark; --bg: #f4f5f7; --fg: #16191c; --card: #fff; --line: #d9dde1; --accent: #2340c8; --accent-fg: #fff; }
+@media (prefers-color-scheme: dark) { :root { --bg: #0e1013; --fg: #eceef1; --card: #16191d; --line: #272c33; --accent: #8299ff; --accent-fg: #0e1013; } }
 * { box-sizing: border-box; }
-body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 16px; background: var(--bg); color: var(--fg); font: 16px/1.4 system-ui, sans-serif; }
-main { width: 100%; max-width: 380px; padding: 28px 24px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; }
-h1 { margin: 0 0 20px; font-size: 20px; }
-a { display: block; margin-top: 10px; padding: 11px 14px; border-radius: 6px; background: var(--accent); color: var(--accent-fg); text-align: center; text-decoration: none; font-weight: 600; overflow-wrap: anywhere; }
+body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 16px; background: var(--bg); color: var(--fg); font: 16px/1.4 "Schibsted Grotesk Variable", "Helvetica Neue", Helvetica, Arial, sans-serif; }
+main { width: 100%; max-width: 380px; padding: 28px 24px; background: var(--card); border: 1px solid var(--line); border-radius: 4px; }
+h1 { margin: 0 0 20px; font-size: 18px; font-weight: 600; }
+a { display: block; margin-top: 10px; padding: 11px 14px; border-radius: 4px; background: var(--accent); color: var(--accent-fg); text-align: center; text-decoration: none; font-weight: 500; overflow-wrap: anywhere; }
 a:focus-visible { outline: 3px solid var(--fg); outline-offset: 2px; }
 </style>
 {{if .CSS}}<style>{{.CSS}}</style>
@@ -137,9 +148,10 @@ func servePickerPage(w http.ResponseWriter, status int, items []pickerItem, css 
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	_ = pickerTmpl.Execute(w, struct {
-		Items []pickerItem
-		CSS   template.CSS
-	}{items, template.CSS(css)}) // #nosec G203 -- operator config, checked for </style by config validation
+		Items    []pickerItem
+		CSS      template.CSS
+		FontFace template.CSS
+	}{items, template.CSS(css), loginFontFace}) // #nosec G203 -- operator config, checked for </style by config validation
 }
 
 // redirectToPicker sends a credential-less browser to the picker,
@@ -167,6 +179,13 @@ func serveLoginRoute(w http.ResponseWriter, r *http.Request, cfg *config.Config,
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if r.URL.Path == loginFontPath {
+		w.Header().Set("Content-Type", "font/woff2")
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		_, _ = w.Write(loginFont)
 		return
 	}
 

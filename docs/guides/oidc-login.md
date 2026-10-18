@@ -167,3 +167,7 @@ Override the custom properties `--bg`, `--fg`, `--card`, `--line`,
 `--accent` and `--accent-fg`, or target `tap-login` (the card),
 `tap-login-title` and `tap-login-method` (each button). To keep the
 stylesheet in its own file, use `css: "${file:/etc/token-auth-proxy/login.css}"`.
+
+The built-in look uses Schibsted Grotesk (SIL Open Font License), which
+the proxy embeds and serves from `/_tap/login/font.woff2`. Set
+`font-family` in your CSS to use a different one.
