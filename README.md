@@ -4,7 +4,8 @@ A minimal HTTP reverse proxy built on Go's standard library (`net/http` /
 `net/http/httputil`). It forwards every request to a single backend
 target, configured via a YAML file (with hot-reload), CLI flags, and/or
 environment variables. It can check inbound HTTP Basic credentials,
-verify JWT bearer tokens, and/or enforce an interactive SAML SP login
+verify JWT bearer tokens, and/or enforce an interactive SAML SP or OIDC
+browser login
 before forwarding (see [Auth](#auth) below), and restrict which
 authenticated identities may use which methods and paths (see
 [Authorization (ACLs)](#authorization-acls)). There's still no per-path
@@ -12,7 +13,7 @@ routing: every allowed request goes to the same `target`.
 
 📖 **New here?** This README is the exhaustive technical reference. For
 an introduction, example use cases, a getting-started walkthrough, and
-task-oriented guides (Basic, JWT, SAML, hot-reload, observability), see
+task-oriented guides (Basic, JWT, SAML, OIDC login, hot-reload, observability), see
 **[the docs](./docs/README.md)**.
 
 ## How it works
@@ -37,7 +38,7 @@ task-oriented guides (Basic, JWT, SAML, hot-reload, observability), see
   at startup, so a later file change to those is logged as requiring a
   restart, not silently ignored. Everything else hot-reloads at
   runtime: `target`, `inbound.auth` (the trusted Basic/JWT/SAML
-  sources, see [Auth](#auth) below) and `acl`.
+  sources and the login page, see [Auth](#auth) below) and `acl`.
 - A malformed or invalid config write is logged and discarded — the
   previously loaded config stays live, so a transient bad write never
   takes the proxy down.

@@ -6,6 +6,9 @@ copy, paste, run. For the exhaustive rule-by-rule reference (exact
 verification order, every field), see the [main README's JWT
 section](../../README.md#jwt-enforced).
 
+To sign browsers in through a JWT source's issuer (authorization code
+flow, optional refresh tokens), see the [OIDC login guide](oidc-login.md).
+
 ## How it works, briefly
 
 A request matching a configured, non-disabled JWT source's `issuer`

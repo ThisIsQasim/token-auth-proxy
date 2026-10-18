@@ -13,7 +13,7 @@ request is authenticated before forwarding it. It forwards everything
 it lets through unchanged to one configured `target` — no path-based
 routing, no request rewriting, no load balancing.
 
-It supports three ways of authenticating a request:
+It supports these ways of authenticating a request:
 
 - **HTTP Basic** — a fixed list of users with bcrypt password hashes,
   for when the thing you're protecting has no users of its own. See the
@@ -25,6 +25,10 @@ It supports three ways of authenticating a request:
 - **SAML SP login** — an interactive Service Provider flow: redirect to
   the IdP, ACS callback, session cookie. See the
   [SAML guide](guides/saml-sso.md).
+- **OIDC browser login**: a JWT source that also signs browsers in
+  through the authorization code flow (confidential or PKCE clients),
+  with optional refresh tokens and a login picker when several methods
+  are configured. See the [OIDC login guide](guides/oidc-login.md).
 
 Only Basic puts anything in the proxy's own config, and even then it's
 a bcrypt verifier rather than a password — a hash can't be replayed as
@@ -54,6 +58,7 @@ that, this isn't the tool for it.
 - **Trusting Kubernetes service account tokens (single- or multi-cluster)?** → [Kubernetes guide](guides/kubernetes-tokens.md)
 - **Authenticating a GitHub Actions workflow?** → [GitHub Actions guide](guides/github-actions.md)
 - **Setting up SAML SSO?** → [SAML SSO guide](guides/saml-sso.md)
+- **Signing browsers in with OIDC (Authentik, Keycloak, Google, ...)?** → [OIDC login guide](guides/oidc-login.md)
 - **Restricting who can use which paths?** → [ACL guide](guides/acls.md)
 - **Wiring up metrics/traces/logs?** → [Observability guide](guides/observability.md)
 - **Deploying with live config changes (e.g. in Kubernetes)?** → [Hot-reload & configuration guide](guides/hot-reload.md)

@@ -89,6 +89,11 @@ matches a token carrying `"groups": ["staff", "admins"]`. SAML
 principals work the same way, with the NameID exposed as a `sub` claim
 alongside the assertion's own attributes.
 
+Tokens issued by OIDC browser login are ordinary JWTs, so `mode: jwt` with
+`source` and `claims` applies to them too. The claims available are the
+ID token's, which depend on the scopes in `login.scopes` (see the
+[OIDC login guide](oidc-login.md#scopes-and-claims)).
+
 ## Overriding without touching the config file
 
 ```sh
