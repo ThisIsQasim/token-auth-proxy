@@ -86,6 +86,9 @@ jobs:
 
   load-test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -180,6 +183,16 @@ jobs:
               fi
             done
           } >> "$GITHUB_STEP_SUMMARY"
+      # Charts p50/p99 over the last runs on main, from their uploaded
+      # reports. Informational: a missing artifact or a gh hiccup must not
+      # fail the job.
+      - name: Chart load test history
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: .github/scripts/load-test-history.sh
       - name: Publish test results
         if: always()
         uses: dorny/test-reporter@v3
