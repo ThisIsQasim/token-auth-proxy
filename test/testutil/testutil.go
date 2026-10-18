@@ -141,10 +141,12 @@ func StartProxyWith(tb testing.TB, env []string, args ...string) *Process {
 		done := make(chan error, 1)
 		go func() { done <- cmd.Wait() }()
 		select {
-		case <-done:
+		case err := <-done:
+			_ = err // a process stopped by SIGTERM exits non-zero by design
 		case <-time.After(5 * time.Second):
 			_ = cmd.Process.Kill()
-			<-done
+			err := <-done
+			_ = err
 		}
 	})
 
