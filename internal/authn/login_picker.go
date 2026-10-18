@@ -27,7 +27,7 @@ const loginFontPath = config.LoginPathPrefix + "/font.woff2"
 var loginFont []byte
 
 // loginFontFace declares the embedded font as "Schibsted Grotesk Variable".
-const loginFontFace = template.CSS(`@font-face { font-family: "Schibsted Grotesk Variable"; font-style: normal; font-weight: 400 900; font-display: swap; src: url("` + loginFontPath + `") format("woff2-variations"); }`)
+const loginFontFace = template.CSS(`@font-face { font-family: "Schibsted Grotesk Variable"; font-style: normal; font-weight: 400 900; font-display: swap; src: url("` + loginFontPath + `") format("woff2-variations"); }`) // #nosec G203 -- fixed string plus the constant font path
 
 // loginMethod is one way a browser with no credential can sign in.
 type loginMethod struct {
