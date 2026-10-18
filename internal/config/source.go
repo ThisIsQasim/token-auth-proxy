@@ -90,6 +90,8 @@ var jsonFieldSpecs = []jsonFieldSpec{
 		usage: "JSON object fully replacing inbound.auth.saml (env TAP_INBOUND_AUTH_SAML_JSON)"},
 	{koanfKey: "inbound.auth.basic", flagName: "inbound-auth-basic-json", envName: "INBOUND_AUTH_BASIC_JSON",
 		usage: "JSON object fully replacing inbound.auth.basic (env TAP_INBOUND_AUTH_BASIC_JSON)"},
+	{koanfKey: "inbound.auth.login_page", flagName: "inbound-auth-login-page-json", envName: "INBOUND_AUTH_LOGIN_PAGE_JSON",
+		usage: "JSON object fully replacing inbound.auth.login_page (env TAP_INBOUND_AUTH_LOGIN_PAGE_JSON)"},
 	{koanfKey: "acl", flagName: "acl-json", envName: "ACL_JSON",
 		usage: "JSON array fully replacing acl (env TAP_ACL_JSON)"},
 }

@@ -65,6 +65,7 @@ for the file form:
 | `--inbound-auth-jwt-json` | `TAP_INBOUND_AUTH_JWT_JSON` | `inbound.auth.jwt` | *(none — file's list, if any, passes through)* |
 | `--inbound-auth-saml-json` | `TAP_INBOUND_AUTH_SAML_JSON` | `inbound.auth.saml` | *(none — file's source, if any, passes through)* |
 | `--inbound-auth-basic-json` | `TAP_INBOUND_AUTH_BASIC_JSON` | `inbound.auth.basic` | *(none — file's source, if any, passes through)* |
+| `--inbound-auth-login-page-json` | `TAP_INBOUND_AUTH_LOGIN_PAGE_JSON` | `inbound.auth.login_page` | *(none, file's value, if any, passes through)* |
 | `--acl-json` | `TAP_ACL_JSON` | `acl` | *(none; the file's rules, if any, pass through)* |
 
 A no-file, flags-only run, for example:
@@ -223,6 +224,130 @@ winning over whatever the file says for that field. Duration fields
 inside the JSON (`jwks_cache_ttl`, ...) should be written as strings
 (`"10m"`), the same as in YAML.
 
+### Browser login with OIDC
+
+A JWT source whose issuer is an OpenID Provider can also sign browsers
+in. Add a `login` block to the source (the source needs
+`oidc_discovery_url`, since the authorization and token endpoints come
+from the discovery document):
+
+```yaml
+inbound:
+  auth:
+    jwt:
+      - issuer: https://idp.example.com/application/o/proxy/
+        oidc_discovery_url: https://idp.example.com/application/o/proxy/.well-known/openid-configuration
+        login:
+          client_id: my-proxy
+          client_secret: ${env:PROXY_OIDC_CLIENT_SECRET}   # omit for a public client
+          sp_base_url: https://proxy.example.com
+```
+
+**`login` fields** (all per source):
+
+| Field | Default | Meaning |
+|---|---|---|
+| `client_id` | required | OAuth client ID; also the default `audiences` (if you set `audiences` it must include it) |
+| `client_secret` | none | Makes it a confidential client. Use `${env:NAME}` or `${file:PATH}`. Omit for a public client |
+| `token_auth_method` | `client_secret_basic` | `client_secret_basic` or `client_secret_post`; only with a secret |
+| `sp_base_url` | required | The proxy's own origin as the browser sees it |
+| `callback_path` | `/oidc/callback` | Register `sp_base_url + callback_path` as the redirect URI |
+| `scopes` | `openid profile email` | Requested scopes; must include `openid` |
+| `cookie_name` | `tap_id_token` | The ID token cookie |
+| `label` | the source name | Button text on the login picker |
+| `refresh` | `false` | Renew the session with a refresh token (see below) |
+| `refresh_max_age` | `720h` | Lifetime of the refresh cookie; only with `refresh` |
+
+- **Confidential or public.** With `client_secret` (write it as `${env:NAME}` or `${file:PATH}`,
+  not inline) the proxy authenticates to the token
+  endpoint with the secret, via `token_auth_method`
+  (`client_secret_basic`, the default, or `client_secret_post`).
+  Without it the proxy is a public client and relies on PKCE alone. PKCE
+  (S256) is used in both cases.
+- **Flow.** A credential-less browser navigation (`GET`/`HEAD` accepting
+  `text/html`) is redirected to the IdP with `state`, `nonce` and a PKCE
+  challenge. The callback (`callback_path`, default `/oidc/callback`,
+  relative to `sp_base_url`; register `sp_base_url + callback_path` as
+  the redirect URI) checks `state`, exchanges the code, verifies the ID
+  token and its `nonce`, and stores the ID token in a cookie
+  (`cookie_name`, default `tap_id_token`), then returns the browser to
+  the page it asked for.
+- **Scopes and claims.** `login.scopes` (default `openid profile email`)
+  decides which claims the ID token carries, and ACL `claims` can only
+  match what is in it. Many IdPs only include `groups` (or similar) when
+  that scope is requested, so add it, e.g. `scopes: [openid, profile, email, groups]`.
+  `openid` is required.
+- **No separate session.** The login cookie is added to the source's
+  `credentials`, so every later request is verified by the ordinary JWT
+  leg and ACLs use `mode: jwt` with `source` and `claims` as for any
+  bearer token. The session therefore lasts as long as the ID token (unless
+  refresh is on, below); the token must also fit in a cookie (about 4KB).
+  `audiences` defaults to the `client_id`; if you set it, it must contain
+  the `client_id`.
+- **Refresh tokens.** Set `login.refresh: true` to keep a browser signed in
+  past the ID token's expiry. The refresh token is stored in a second
+  cookie (`<cookie_name>_refresh`, lasting `refresh_max_age`, default
+  30 days) and never forwarded to the backend. When a request arrives
+  with that cookie but no ID token, the proxy redeems it, sets fresh
+  cookies, and the request carries on as if the session had not expired,
+  for browser and API requests alike. The IdP has to issue refresh
+  tokens to this client, which usually means adding `offline_access` to
+  `scopes` yourself (it is not added for you, since some IdPs reject
+  it); a warning is logged at login if none is issued. If the IdP
+  refuses the token (revoked, expired) the cookie is cleared and a
+  browser goes through a full login; if the IdP is unreachable the
+  request gets a `503` and the cookie is kept. Parallel requests share
+  one redemption (for 30 seconds per refresh token, per process), so a
+  rotating IdP sees each token once; behind several replicas without
+  sticky routing a rotating IdP can still see a reuse.
+- **Other clients.** Requests that are not browser navigations still get
+  the plain `401`. Bearer tokens in the `Authorization` header keep
+  working on the same source.
+- **More than one source.** Each source with a `login` block is a
+  separate login method with its own client, scopes and cookies, and
+  gets its own button on the picker. Their `callback_path` and
+  `cookie_name` values must differ (validation rejects duplicates):
+
+  ```yaml
+  inbound:
+    auth:
+      jwt:
+        - name: authentik
+          issuer: https://auth.example.com/application/o/proxy/
+          oidc_discovery_url: https://auth.example.com/application/o/proxy/.well-known/openid-configuration
+          login:
+            client_id: proxy-a
+            client_secret: ${env:AUTHENTIK_SECRET}
+            sp_base_url: https://proxy.example.com
+            scopes: [openid, profile, email, groups]
+        - name: google
+          issuer: https://accounts.google.com
+          oidc_discovery_url: https://accounts.google.com/.well-known/openid-configuration
+          login:
+            client_id: proxy-b
+            sp_base_url: https://proxy.example.com
+            callback_path: /oidc/google/callback
+            cookie_name: tap_id_token_google
+            scopes: [openid, email]
+  ```
+
+- **Several methods, one picker.** When more than one interactive method
+  is configured (SAML, Basic, and each JWT source with `login`), a
+  credential-less browser navigation is redirected to `/_tap/login`, a
+  page with one button per method (`login.label` names a JWT source's
+  button, defaulting to the source name). Choosing Basic answers with a
+  `401` challenge so the browser shows its password prompt; choosing
+  SAML or OIDC starts that flow. The choice is remembered in a
+  `tap_login_method` cookie so the picker is skipped next time. With a
+  single method there is no picker. The `/_tap/login` paths are served
+  by the proxy and never reach the backend.
+- **Styling the picker.** `inbound.auth.login_page.css` is appended
+  after the built-in styles. Override the custom properties `--bg`,
+  `--fg`, `--card`, `--line`, `--accent` and `--accent-fg`, or target
+  the classes `tap-login` (the card), `tap-login-title` and
+  `tap-login-method` (each button). `${file:/path/to.css}` keeps the
+  stylesheet in its own file. It may not contain `</style`.
+
 ### Basic (enforced)
 
 `inbound.auth.basic` is a fixed list of users with bcrypt password
@@ -356,11 +481,17 @@ order:
    (any configured `credentials` location had a non-empty value), JWT
    alone decides — a bad bearer token gets `401`, never a SAML
    redirect.
-4. Otherwise, if **SAML** is enabled, it makes the redirect-or-forward
-   decision. Note this comes *before* step 5, so with SAML enabled a
-   credential-less request is redirected to the IdP and never sees a
-   Basic challenge — basic auth then only serves clients that send the
-   header proactively, with no browser password prompt.
+4. Otherwise a credential-less request is handled as a browser login,
+   depending on how many interactive methods (SAML, Basic, and JWT
+   sources with `login`) are configured. With two or more, a browser
+   navigation goes to the method it chose before, or to the login picker
+   (see "Browser login with OIDC"). With exactly one: **SAML** makes the
+   redirect-or-forward decision; a JWT source with `login` redirects a
+   browser navigation to the IdP. Note this comes *before* step 5, so
+   with SAML enabled a credential-less request is redirected to the IdP
+   and never sees a Basic challenge, unless the picker is in play and
+   Basic was chosen. Callbacks (SAML ACS, OIDC) and `/_tap/login` are
+   dispatched ahead of step 2.
 5. Otherwise the `401` carries a challenge for **each** enabled mode
    (`Basic realm="..."` and/or `Bearer`), as separate
    `WWW-Authenticate` header lines.

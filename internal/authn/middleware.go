@@ -165,10 +165,11 @@ func enforceJWT(w http.ResponseWriter, r *http.Request, cfg *config.Config, reg 
 // HTML login page is useless and loses the request body. There's no
 // content negotiation (e.g. sniffing Accept to choose 401 vs 302) in
 // this build — see the README's SAML limitations section.
-func NewMiddleware(source ConfigSource, jwtReg *Registry, samlReg *SAMLRegistry, basicReg *BasicRegistry, logger *slog.Logger) func(http.Handler) http.Handler {
+func NewMiddleware(source ConfigSource, jwtReg *Registry, samlReg *SAMLRegistry, basicReg *BasicRegistry, loginReg *LoginRegistry, logger *slog.Logger) func(http.Handler) http.Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
+	deps := loginDeps{saml: samlReg, basic: basicReg, login: loginReg}
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -181,6 +182,7 @@ func NewMiddleware(source ConfigSource, jwtReg *Registry, samlReg *SAMLRegistry,
 			jwtEnabled := cfg.Inbound.Auth.JWTEnabled()
 			samlEnabled := cfg.Inbound.Auth.SAMLEnabled()
 			basicEnabled := cfg.Inbound.Auth.BasicEnabled()
+			loginMethodCount := cfg.Inbound.Auth.LoginMethodCount()
 
 			var samlSrc config.SAMLSource
 			if samlEnabled {
@@ -199,6 +201,20 @@ func NewMiddleware(source ConfigSource, jwtReg *Registry, samlReg *SAMLRegistry,
 					return
 				}
 				serveACS(mw, w, r)
+				return
+			}
+
+			// Step 1b: OIDC login callbacks and the proxy's own login
+			// routes. Like the ACS path, neither can sit behind a credential
+			// check: the browser arrives with none.
+			for _, src := range cfg.Inbound.Auth.LoginSources() {
+				if r.URL.Path == src.Login.CallbackPath {
+					loginReg.Callback(w, r, src)
+					return
+				}
+			}
+			if loginMethodCount > 0 && isLoginRoute(r.URL.Path) {
+				serveLoginRoute(w, r, cfg, deps, logger)
 				return
 			}
 
@@ -224,6 +240,9 @@ func NewMiddleware(source ConfigSource, jwtReg *Registry, samlReg *SAMLRegistry,
 
 			// Step 3.
 			if jwtEnabled {
+				if loginReg.Refresh(w, r, cfg) {
+					return
+				}
 				outcome, p := enforceJWT(w, r, cfg, jwtReg, logger)
 				switch outcome {
 				case jwtAllowed:
@@ -242,7 +261,28 @@ func NewMiddleware(source ConfigSource, jwtReg *Registry, samlReg *SAMLRegistry,
 				}
 			}
 
-			// Step 4.
+			// Step 4. With two or more interactive methods, a browser
+			// navigation goes to the method it picked before, or to the
+			// picker; with exactly one, that method runs directly.
+			nav := browserNav(r)
+			if loginMethodCount >= 2 && nav {
+				methods := loginMethods(cfg.Inbound.Auth)
+				m, ok := chosenMethod(r, methods)
+				if !ok {
+					redirectToPicker(w, r)
+					return
+				}
+				switch m.kind {
+				case "basic":
+					rejectChallenges(w, logger, r, reasonNoCredential, []string{basicChallenge(basicSrc.Realm)})
+					return
+				case "jwt":
+					src := jwtLoginSource(cfg.Inbound.Auth, m.source)
+					loginReg.Start(w, r, src, r.URL.RequestURI())
+					return
+				}
+				// "saml" runs below.
+			}
 			if samlEnabled {
 				mw, err := samlReg.Provider(samlSrc)
 				if err != nil {
@@ -251,6 +291,15 @@ func NewMiddleware(source ConfigSource, jwtReg *Registry, samlReg *SAMLRegistry,
 				}
 				enforceSAML(mw, aclHandler(cfg.ACL, logger, next)).ServeHTTP(w, r)
 				return
+			}
+			if loginMethodCount == 1 && nav {
+				// Only a JWT login source can be the one method here: SAML
+				// returned above, and a lone Basic source falls through to
+				// the 401 challenge below.
+				if srcs := cfg.Inbound.Auth.LoginSources(); len(srcs) == 1 {
+					loginReg.Start(w, r, srcs[0], r.URL.RequestURI())
+					return
+				}
 			}
 
 			// Step 5.

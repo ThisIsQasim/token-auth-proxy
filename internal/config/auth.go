@@ -4,6 +4,7 @@ import (
 	"crypto/rsa"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -111,6 +112,29 @@ type InboundAuthConfig struct {
 	JWT   []JWTSource  `yaml:"jwt,omitempty"`
 	SAML  *SAMLSource  `yaml:"saml,omitempty"`
 	Basic *BasicSource `yaml:"basic,omitempty"`
+
+	// LoginPage customizes the login picker page; see LoginPageConfig.
+	LoginPage *LoginPageConfig `yaml:"login_page,omitempty"`
+}
+
+// LoginPageConfig customizes the login picker page shown when more than one
+// interactive login method is configured.
+type LoginPageConfig struct {
+	// CSS is appended after the built-in styles, so it can override them.
+	// The page exposes the custom properties --bg, --fg, --card, --line,
+	// --accent and --accent-fg, and the classes tap-login (the card),
+	// tap-login-title and tap-login-method (each button). A ${file:...}
+	// reference is the usual way to keep a stylesheet in its own file.
+	CSS string `yaml:"css,omitempty"`
+}
+
+func (l *LoginPageConfig) validate() error {
+	// The CSS is emitted inside a <style> element; a closing tag would end
+	// it early and let the rest be read as HTML.
+	if strings.Contains(strings.ToLower(l.CSS), "</style") {
+		return fmt.Errorf("login_page.css must not contain \"</style\"")
+	}
+	return nil
 }
 
 // applyDefaults fills in every JWT source's own defaults, and SAML's
@@ -202,7 +226,14 @@ func markUnique(seen map[string]bool, label, val string) error {
 // only ever one of it. There's no acs_path/session_cookie uniqueness
 // check to make either, since at most one SAML source can ever exist.
 func (a *InboundAuthConfig) Validate() error {
+	if a.LoginPage != nil {
+		if err := a.LoginPage.validate(); err != nil {
+			return fmt.Errorf("inbound.auth.login_page: %w", err)
+		}
+	}
 	names := make(map[string]bool, len(a.JWT)+1)
+	loginPaths := map[string]bool{}
+	loginCookies := map[string]bool{}
 
 	for i := range a.JWT {
 		j := &a.JWT[i]
@@ -211,6 +242,34 @@ func (a *InboundAuthConfig) Validate() error {
 		}
 		if err := markUnique(names, "name", j.Name); err != nil {
 			return fmt.Errorf("inbound.auth.jwt[%d]: %w", i, err)
+		}
+		if j.LoginEnabled() {
+			if err := markUnique(loginPaths, "login.callback_path", j.Login.CallbackPath); err != nil {
+				return fmt.Errorf("inbound.auth.jwt[%d]: %w", i, err)
+			}
+			if err := markUnique(loginCookies, "login.cookie_name", j.Login.CookieName); err != nil {
+				return fmt.Errorf("inbound.auth.jwt[%d]: %w", i, err)
+			}
+			if j.Login.Refresh {
+				if err := markUnique(loginCookies, "login refresh cookie", j.Login.RefreshCookieName()); err != nil {
+					return fmt.Errorf("inbound.auth.jwt[%d]: %w", i, err)
+				}
+			}
+		}
+	}
+
+	if a.SAML != nil {
+		for i := range a.JWT {
+			l := a.JWT[i].Login
+			if l == nil {
+				continue
+			}
+			if l.CallbackPath == a.SAML.ACSPath {
+				return fmt.Errorf("inbound.auth.jwt[%d]: login.callback_path %q collides with inbound.auth.saml.acs_path", i, l.CallbackPath)
+			}
+			if l.CookieName == a.SAML.SessionCookie {
+				return fmt.Errorf("inbound.auth.jwt[%d]: login.cookie_name %q collides with inbound.auth.saml.session_cookie", i, l.CookieName)
+			}
 		}
 	}
 
@@ -371,6 +430,178 @@ type JWTSource struct {
 	Algorithms   []string      `yaml:"algorithms,omitempty"`     // defaults to ["RS256"]; every entry must be in allowedAlgorithms; always authoritative regardless of what a fetched key claims about itself (RFC 8725 §3.1)
 	JWKSCacheTTL time.Duration `yaml:"jwks_cache_ttl,omitempty"` // defaults to defaultJWKSCacheTTL
 	ClockSkew    time.Duration `yaml:"clock_skew,omitempty"`     // defaults to defaultClockSkew
+
+	// Login, when set, additionally lets a browser sign in through this
+	// issuer with the OIDC authorization code flow. See JWTLogin.
+	Login *JWTLogin `yaml:"login,omitempty"`
+}
+
+// JWTLogin turns a JWTSource whose issuer is an OpenID Provider into a
+// browser login: a request with no credential is sent through the
+// authorization code flow, and the verified ID token is stored in a
+// cookie. That cookie is read back through the source's own Credentials
+// (applyDefaults appends it), so every later request is verified by the
+// ordinary JWT leg; there is no separate session format. The session
+// therefore ends when the ID token expires, and the token has to fit in
+// a cookie (about 4KB).
+//
+// With ClientSecret set the proxy is a confidential client and
+// authenticates to the token endpoint with the secret; without it, it
+// is a public client and relies on PKCE alone. PKCE (S256) is used in
+// both cases.
+type JWTLogin struct {
+	ClientID string `yaml:"client_id"` // required; must be among the source's Audiences (defaulted to just this when none are set)
+
+	// ClientSecret is the client secret. Empty means a public client.
+	// Write it as "${env:NAME}" or "${file:PATH}" (see interpolate.go)
+	// rather than inline; an unset reference fails the config load.
+	ClientSecret string `yaml:"client_secret,omitempty"`
+
+	// TokenAuthMethod is how the secret is presented to the token
+	// endpoint: "client_secret_basic" (default) or "client_secret_post".
+	// Only valid with ClientSecret.
+	TokenAuthMethod string `yaml:"token_auth_method,omitempty"`
+
+	Scopes       []string `yaml:"scopes,omitempty"`        // defaults to openid, profile, email
+	SPBaseURL    string   `yaml:"sp_base_url,omitempty"`   // required; this proxy's own externally-reachable origin
+	CallbackPath string   `yaml:"callback_path,omitempty"` // defaults to defaultLoginCallbackPath, relative to SPBaseURL
+	CookieName   string   `yaml:"cookie_name,omitempty"`   // defaults to defaultLoginCookieName
+	Label        string   `yaml:"label,omitempty"`         // button text on the login picker: "Sign in with <label>"; defaults to the source name
+
+	// Refresh keeps a browser signed in past the ID token's expiry: the
+	// refresh token from the token endpoint is stored in a second cookie
+	// (CookieName + "_refresh"), and when a request arrives with that
+	// cookie but no ID token, the proxy redeems it for a new one. The IdP
+	// must issue refresh tokens to this client, which usually means adding
+	// the "offline_access" scope to Scopes yourself; the scope is not added
+	// for you because some IdPs reject it. The refresh cookie is never
+	// forwarded to the backend.
+	Refresh bool `yaml:"refresh,omitempty"`
+
+	// RefreshMaxAge is how long the refresh cookie lives in the browser,
+	// default defaultRefreshMaxAge. The IdP may end a session sooner, in
+	// which case the user is sent through a full login. Only valid with
+	// Refresh.
+	RefreshMaxAge time.Duration `yaml:"refresh_max_age,omitempty"`
+}
+
+const (
+	defaultLoginCallbackPath = "/oidc/callback"
+	defaultLoginCookieName   = "tap_id_token"
+	defaultRefreshMaxAge     = 30 * 24 * time.Hour
+
+	// LoginPathPrefix is the route family serving the login method picker
+	// and its per-method entry points. It is handled by the proxy itself
+	// and never reaches the backend.
+	LoginPathPrefix = "/_tap/login"
+
+	// TokenAuthBasic sends the client secret in the Authorization header.
+	TokenAuthBasic = "client_secret_basic"
+	// TokenAuthPost sends the client secret in the form body.
+	TokenAuthPost = "client_secret_post"
+)
+
+// LoginEnabled reports whether browser login is configured for j.
+func (j JWTSource) LoginEnabled() bool {
+	return !j.Disabled && j.Login != nil
+}
+
+// LoginSources returns every enabled JWT source with browser login, in
+// config order.
+func (a InboundAuthConfig) LoginSources() []JWTSource {
+	var out []JWTSource
+	for _, j := range a.JWT {
+		if j.LoginEnabled() {
+			out = append(out, j)
+		}
+	}
+	return out
+}
+
+// LoginMethodCount is the number of ways a browser with no credential
+// can sign in: SAML, Basic, and one per JWT source with browser login.
+// More than one means the user is shown a picker.
+func (a InboundAuthConfig) LoginMethodCount() int {
+	n := len(a.LoginSources())
+	if a.SAMLEnabled() {
+		n++
+	}
+	if a.BasicEnabled() {
+		n++
+	}
+	return n
+}
+
+func (l *JWTLogin) applyDefaults() {
+	if l.CallbackPath == "" {
+		l.CallbackPath = defaultLoginCallbackPath
+	}
+	if l.CookieName == "" {
+		l.CookieName = defaultLoginCookieName
+	}
+	if len(l.Scopes) == 0 {
+		l.Scopes = []string{"openid", "profile", "email"}
+	}
+	if l.ClientSecret != "" && l.TokenAuthMethod == "" {
+		l.TokenAuthMethod = TokenAuthBasic
+	}
+	if l.Refresh && l.RefreshMaxAge == 0 {
+		l.RefreshMaxAge = defaultRefreshMaxAge
+	}
+}
+
+// RefreshCookieName is the cookie holding the refresh token.
+func (l JWTLogin) RefreshCookieName() string { return l.CookieName + "_refresh" }
+
+func (l *JWTLogin) validate(j *JWTSource) error {
+	if j.OIDCDiscoveryURL == "" {
+		return fmt.Errorf("login requires oidc_discovery_url (the authorization and token endpoints come from the discovery document)")
+	}
+	if l.ClientID == "" {
+		return fmt.Errorf("login.client_id is required")
+	}
+	if !slices.Contains(j.Audiences, l.ClientID) {
+		return fmt.Errorf("audiences must contain login.client_id %q, the aud of the ID tokens the login produces", l.ClientID)
+	}
+	if l.SPBaseURL == "" {
+		return fmt.Errorf("login.sp_base_url is required")
+	}
+	if _, err := parseAbsoluteHTTPURL("login.sp_base_url", l.SPBaseURL); err != nil {
+		return err
+	}
+	if !strings.HasPrefix(l.CallbackPath, "/") {
+		return fmt.Errorf("login.callback_path must begin with %q", "/")
+	}
+	if l.CallbackPath == "/healthz" || l.CallbackPath == "/metrics" ||
+		l.CallbackPath == LoginPathPrefix || strings.HasPrefix(l.CallbackPath, LoginPathPrefix+"/") {
+		return fmt.Errorf("login.callback_path must not be %q: that path is served by the proxy itself", l.CallbackPath)
+	}
+	if !slices.Contains(l.Scopes, "openid") {
+		return fmt.Errorf("login.scopes must include %q", "openid")
+	}
+
+	if l.ClientSecret == "" {
+		if l.TokenAuthMethod != "" {
+			return fmt.Errorf("login.token_auth_method only applies with login.client_secret")
+		}
+	} else {
+		if l.TokenAuthMethod != TokenAuthBasic && l.TokenAuthMethod != TokenAuthPost {
+			return fmt.Errorf("login.token_auth_method %q must be %s or %s", l.TokenAuthMethod, TokenAuthBasic, TokenAuthPost)
+		}
+	}
+
+	if !l.Refresh && l.RefreshMaxAge != 0 {
+		return fmt.Errorf("login.refresh_max_age only applies with login.refresh")
+	}
+	if l.RefreshMaxAge < 0 {
+		return fmt.Errorf("login.refresh_max_age must not be negative")
+	}
+
+	// A cookie value may not contain these, and the name is used as-is.
+	if strings.ContainsAny(l.CookieName, " \t;,=\"\\") {
+		return fmt.Errorf("login.cookie_name %q is not a valid cookie name", l.CookieName)
+	}
+	return nil
 }
 
 // applyDefaults fills zero-value fields. Deliberately never inferred
@@ -394,6 +625,19 @@ func (j *JWTSource) applyDefaults() {
 	}
 	if len(j.Credentials) == 0 {
 		j.Credentials = []CredentialLocation{{Location: "header", Name: "Authorization", Prefix: "Bearer "}}
+	}
+	if j.Login != nil {
+		j.Login.applyDefaults()
+		if len(j.Audiences) == 0 {
+			j.Audiences = []string{j.Login.ClientID}
+		}
+		// The login cookie is read back through the ordinary credential
+		// path, so it must be one of the places this source looks.
+		if !slices.ContainsFunc(j.Credentials, func(c CredentialLocation) bool {
+			return c.Location == "cookie" && c.Name == j.Login.CookieName
+		}) {
+			j.Credentials = append(j.Credentials, CredentialLocation{Location: "cookie", Name: j.Login.CookieName})
+		}
 	}
 }
 
@@ -453,6 +697,12 @@ func (j *JWTSource) validate() error {
 		}
 		if c.Name == "" {
 			return fmt.Errorf("credentials[%d]: name is required", i)
+		}
+	}
+
+	if j.Login != nil {
+		if err := j.Login.validate(j); err != nil {
+			return err
 		}
 	}
 

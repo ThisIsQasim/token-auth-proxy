@@ -63,7 +63,7 @@ func newACLEnv(t *testing.T, modes aclModes, rules []config.ACLRule, logger *slo
 	t.Cleanup(reg.Close)
 	samlReg := NewSAMLRegistry(testLogger())
 	t.Cleanup(samlReg.Close)
-	env.handler = NewMiddleware(env.source, reg, samlReg, NewBasicRegistry(testLogger()), logger)(env.backend.Handler())
+	env.handler = NewMiddleware(env.source, reg, samlReg, NewBasicRegistry(testLogger()), NewLoginRegistry(reg, testLogger()), logger)(env.backend.Handler())
 	return env
 }
 

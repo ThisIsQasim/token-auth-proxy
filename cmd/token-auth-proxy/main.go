@@ -148,7 +148,7 @@ func run() error {
 
 	transport := proxy.BuildTransport(cfg)
 	rp := proxy.New(source, logger, transport)
-	requireAuth := authn.NewMiddleware(source, authRegistry, samlRegistry, basicRegistry, logger)
+	requireAuth := authn.NewMiddleware(source, authRegistry, samlRegistry, basicRegistry, authn.NewLoginRegistry(authRegistry, logger), logger)
 
 	mux := http.NewServeMux()
 	mux.Handle("/healthz", proxy.HealthzHandler())   // deliberately unauthenticated

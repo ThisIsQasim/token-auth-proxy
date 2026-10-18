@@ -22,8 +22,10 @@ const maxDiscoveryBodyBytes = 1 << 20 // 1 MiB
 // verified is the algorithm-confusion foot-gun JWTSource.applyDefaults
 // already warns about; JWTSource.Algorithms stays the sole authority.
 type discoveryDoc struct {
-	Issuer  string `json:"issuer"`
-	JWKSURI string `json:"jwks_uri"`
+	Issuer                string `json:"issuer"`
+	JWKSURI               string `json:"jwks_uri"`
+	AuthorizationEndpoint string `json:"authorization_endpoint"` // read only for browser login
+	TokenEndpoint         string `json:"token_endpoint"`         // read only for browser login
 }
 
 // fetchJWKSURI fetches the OIDC discovery document at discoveryURL
@@ -43,35 +45,44 @@ type discoveryDoc struct {
 // configured jwks_url — one JWKS-resolution code path for both, see
 // jwks.go.
 func fetchJWKSURI(ctx context.Context, client *http.Client, discoveryURL, wantIssuer string) (string, error) {
+	doc, err := fetchDiscovery(ctx, client, discoveryURL, wantIssuer)
+	if err != nil {
+		return "", err
+	}
+	return doc.JWKSURI, nil
+}
+
+// fetchDiscovery fetches and checks the document as fetchJWKSURI describes.
+func fetchDiscovery(ctx context.Context, client *http.Client, discoveryURL, wantIssuer string) (*discoveryDoc, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, discoveryURL, nil)
 	if err != nil {
-		return "", fmt.Errorf("build discovery request: %w", err)
+		return nil, fmt.Errorf("build discovery request: %w", err)
 	}
 
 	resp, err := client.Do(req) // #nosec G107 -- discoveryURL comes from validated operator config, not request input
 	if err != nil {
-		return "", fmt.Errorf("fetch discovery document: %w", err)
+		return nil, fmt.Errorf("fetch discovery document: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("discovery document: unexpected status %d", resp.StatusCode)
+		return nil, fmt.Errorf("discovery document: unexpected status %d", resp.StatusCode)
 	}
 
 	var doc discoveryDoc
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxDiscoveryBodyBytes)).Decode(&doc); err != nil {
-		return "", fmt.Errorf("decode discovery document: %w", err)
+		return nil, fmt.Errorf("decode discovery document: %w", err)
 	}
 
 	if doc.Issuer != wantIssuer {
-		return "", fmt.Errorf("discovery document issuer %q does not match configured issuer %q", doc.Issuer, wantIssuer)
+		return nil, fmt.Errorf("discovery document issuer %q does not match configured issuer %q", doc.Issuer, wantIssuer)
 	}
 
 	if err := validateAbsoluteHTTPURL(doc.JWKSURI); err != nil {
-		return "", fmt.Errorf("discovery document jwks_uri: %w", err)
+		return nil, fmt.Errorf("discovery document jwks_uri: %w", err)
 	}
 
-	return doc.JWKSURI, nil
+	return &doc, nil
 }
 
 // validateAbsoluteHTTPURL checks raw is an absolute http(s) URL with a

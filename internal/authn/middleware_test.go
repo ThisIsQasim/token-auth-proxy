@@ -148,7 +148,7 @@ func newTestMiddleware(t *testing.T, source ConfigSource, reg *Registry) func(ht
 	t.Helper()
 	samlReg := NewSAMLRegistry(testLogger())
 	t.Cleanup(samlReg.Close)
-	return NewMiddleware(source, reg, samlReg, NewBasicRegistry(testLogger()), testLogger())
+	return NewMiddleware(source, reg, samlReg, NewBasicRegistry(testLogger()), NewLoginRegistry(reg, testLogger()), testLogger())
 }
 
 func bearerRequest(t *testing.T, token string) *http.Request {
@@ -475,7 +475,7 @@ func TestMiddleware_MultipleSourcesShareIssuer_KeysUnavailableReasonWins(t *test
 	logger, handler := newRecordingLogger()
 	samlReg := NewSAMLRegistry(logger)
 	t.Cleanup(samlReg.Close)
-	mw := NewMiddleware(source, reg, samlReg, NewBasicRegistry(logger), logger)
+	mw := NewMiddleware(source, reg, samlReg, NewBasicRegistry(logger), NewLoginRegistry(reg, logger), logger)
 
 	// Signed by neither configured source's key - working's real JWKS
 	// has no matching key for it, so verification fails ordinarily.

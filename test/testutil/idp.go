@@ -134,6 +134,9 @@ type TestIDP struct {
 
 	jwksHits      atomic.Int64
 	discoveryHits atomic.Int64
+
+	oidcOnce sync.Once
+	oidcSt   *oidcState
 }
 
 // NewTestIDP starts a TestIDP and registers tb.Cleanup to shut it down.
@@ -151,6 +154,8 @@ func NewTestIDP(tb testing.TB, opts ...IDPOption) *TestIDP {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/jwks.json", idp.serveJWKS)
 	mux.HandleFunc("/.well-known/openid-configuration", idp.serveDiscovery)
+	mux.HandleFunc("/authorize", idp.serveAuthorize)
+	mux.HandleFunc("/token", idp.serveToken)
 
 	// Unstarted-then-Start avoids a data race between setting
 	// idp.JWKSURL/Issuer below and the server's handler goroutines
@@ -186,8 +191,10 @@ func (i *TestIDP) serveJWKS(w http.ResponseWriter, _ *http.Request) {
 func (i *TestIDP) serveDiscovery(w http.ResponseWriter, _ *http.Request) {
 	i.discoveryHits.Add(1)
 	doc := map[string]string{
-		"issuer":   i.Issuer,
-		"jwks_uri": i.JWKSURL,
+		"issuer":                 i.Issuer,
+		"jwks_uri":               i.JWKSURL,
+		"authorization_endpoint": i.Server.URL + "/authorize",
+		"token_endpoint":         i.Server.URL + "/token",
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(doc)

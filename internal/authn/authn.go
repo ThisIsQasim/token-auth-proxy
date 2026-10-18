@@ -67,6 +67,11 @@ const (
 	// saml_middleware.go's rejectUnavailable.
 	reasonSAMLMetadataUnavailable reason = "saml_metadata_unavailable"
 
+	// reasonLoginUnavailable is SAML's counterpart for OIDC browser
+	// login: the source's discovery document couldn't be fetched, so
+	// there is no authorization or token endpoint to use.
+	reasonLoginUnavailable reason = "login_unavailable"
+
 	// reasonACLDenied is the only 403 reason: the request authenticated
 	// (or no auth is enabled) but no ACL rule allows it, or its path isn't
 	// clean enough to match rules against safely.
