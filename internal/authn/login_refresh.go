@@ -76,7 +76,16 @@ func TakeRefreshCookies(r *http.Request, auth config.InboundAuthConfig) map[stri
 			names[j.Login.RefreshCookieName()] = j.Name
 		}
 	}
-	if names == nil || r.Header.Get("Cookie") == "" {
+	if names == nil {
+		return nil
+	}
+	return takeCookies(r, names)
+}
+
+// takeCookies removes the cookies named by names (cookie name to key) from
+// r and returns their values by key.
+func takeCookies(r *http.Request, names map[string]string) map[string]string {
+	if r.Header.Get("Cookie") == "" {
 		return nil
 	}
 
@@ -235,4 +244,18 @@ func (l *LoginRegistry) doRefresh(ctx context.Context, src config.JWTSource, ref
 		next = refreshToken
 	}
 	return refreshOutcome{idToken: rawID, refreshToken: next, maxAge: maxAge}, nil
+}
+
+// DropStaleLogin removes the login cookie a request was carrying and that
+// failed verification: from the request, so the request is judged without
+// it, and from the browser, so it stops sending it. It touches only the
+// source whose cookie the credential came from.
+func (l *LoginRegistry) DropStaleLogin(w http.ResponseWriter, r *http.Request, cfg *config.Config) {
+	_, src, ok := extractTokenFrom(r, cfg.Inbound.Auth)
+	if !ok || src == nil {
+		return
+	}
+	takeCookies(r, map[string]string{src.Login.CookieName: src.Name})
+	http.SetCookie(w, loginCookie(*src, src.Login.CookieName, "", -1))
+	l.logger.InfoContext(r.Context(), "login cookie failed verification, dropped", "source", src.Name)
 }

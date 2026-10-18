@@ -36,9 +36,10 @@ Three values, all yours to choose (not given to you by the IdP):
   `<sp_base_url>/saml/metadata` even though this proxy doesn't serve a
   metadata endpoint at that path (most IdPs are configured with SP
   details manually or via a metadata *file*, not a live fetch).
-- **`acs_path`** — where the IdP POSTs the assertion back to, e.g.
-  `/saml/corp-sso/acs`. Combined with `sp_base_url`, this is the full
-  ACS URL you'll give the IdP.
+- **`acs_path`** — where the IdP POSTs the assertion back to. Optional;
+  defaults to `/_tap/saml/acs`, under the `/_tap/` prefix the proxy keeps for
+  its own routes so it cannot shadow a backend path. Combined with
+  `sp_base_url`, this is the full ACS URL you'll give the IdP.
 
 ## Step 2: Generate a session-signing key
 
@@ -65,7 +66,6 @@ inbound:
       idp_metadata_url: "https://idp.corp.example.com/metadata"
       sp_base_url: "https://proxy.example.com"
       sp_entity_id: "https://proxy.example.com/saml/metadata"
-      acs_path: "/saml/corp-sso/acs"
       session_cookie: "corp_sso_session"
       session_signing_key_env: "CORP_SSO_SESSION_KEY"
       session_duration: 8h        # optional, default 12h
@@ -82,7 +82,7 @@ Give your IdP administrator (or configure yourself, if it's
 self-service):
 
 - **ACS URL**: `<sp_base_url><acs_path>`, e.g.
-  `https://proxy.example.com/saml/corp-sso/acs`
+  `https://proxy.example.com/_tap/saml/acs`
 - **SP Entity ID**: your configured `sp_entity_id`
 - **Binding**: HTTP-POST for the ACS endpoint
 

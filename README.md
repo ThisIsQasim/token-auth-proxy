@@ -252,7 +252,7 @@ inbound:
 | `client_secret` | none | Makes it a confidential client. Use `${env:NAME}` or `${file:PATH}`. Omit for a public client |
 | `token_auth_method` | `client_secret_basic` | `client_secret_basic` or `client_secret_post`; only with a secret |
 | `sp_base_url` | required | The proxy's own origin as the browser sees it |
-| `callback_path` | `/oidc/callback` | Register `sp_base_url + callback_path` as the redirect URI |
+| `callback_path` | `/_tap/oidc/callback` | Register `sp_base_url + callback_path` as the redirect URI |
 | `scopes` | `openid profile email` | Requested scopes; must include `openid` |
 | `cookie_name` | `tap_id_token` | The ID token cookie; letters, digits and `!#$%&'*+-.^_`|~` only, and not starting with `tap_login_` |
 | `label` | the source name | Button text on the login picker |
@@ -267,7 +267,7 @@ inbound:
   (S256) is used in both cases.
 - **Flow.** A credential-less browser navigation (`GET`/`HEAD` accepting
   `text/html`) is redirected to the IdP with `state`, `nonce` and a PKCE
-  challenge. The callback (`callback_path`, default `/oidc/callback`,
+  challenge. The callback (`callback_path`, default `/_tap/oidc/callback`,
   relative to `sp_base_url`; register `sp_base_url + callback_path` as
   the redirect URI) checks `state`, exchanges the code, verifies the ID
   token and its `nonce`, and stores the ID token in a cookie
@@ -297,7 +297,12 @@ inbound:
   it); a warning is logged at login if none is issued. If the IdP
   refuses the token (revoked, expired) the cookie is cleared and a
   browser goes through a full login; if the IdP is unreachable the
-  request gets a `503` and the cookie is kept. Parallel requests share
+  request gets a `503` and the cookie is kept. A login cookie that
+  fails verification (the browser's clock is behind and the token has
+  expired by the proxy's, or the IdP rotated its signing key) is treated
+  as an expired session: it is dropped and renewed the same way, or the
+  browser goes through login again. A token sent in a header is never
+  treated like this; it is a plain `401`. Parallel requests share
   one redemption (for 30 seconds per refresh token, per process), so a
   rotating IdP sees each token once; behind several replicas without
   sticky routing a rotating IdP can still see a reuse.
@@ -327,7 +332,7 @@ inbound:
           login:
             client_id: proxy-b
             sp_base_url: https://proxy.example.com
-            callback_path: /oidc/google/callback
+            callback_path: /_tap/oidc/google/callback
             cookie_name: tap_id_token_google
             scopes: [openid, email]
   ```
@@ -340,8 +345,9 @@ inbound:
   `401` challenge so the browser shows its password prompt; choosing
   SAML or OIDC starts that flow. The choice is remembered in a
   `tap_login_method` cookie so the picker is skipped next time. With a
-  single method there is no picker. The `/_tap/login` paths are served
-  by the proxy and never reach the backend.
+  single method there is no picker. The `/_tap/login` paths and the default
+  callback (`/_tap/oidc/callback`) are served by the proxy and never reach
+  the backend; keep `/_tap/` out of your backend routes.
 - **Styling the picker.** `inbound.auth.login_page.css` is appended
   after the built-in styles. Override the custom properties `--bg`,
   `--fg`, `--card`, `--line`, `--accent` and `--accent-fg`, or target
@@ -424,7 +430,7 @@ limitation below for exactly who that does and doesn't unblock.
 - **Unauthenticated request**: redirected (`302`) to the IdP's SSO URL
   with a short-lived, HS256-signed tracking cookie (`saml_`-prefixed)
   recording the original URL and the expected SAML request ID.
-- **ACS callback** (`acs_path`): the IdP's `POST`ed assertion is
+- **ACS callback** (`acs_path`, default `/_tap/saml/acs`): the IdP's `POST`ed assertion is
   signature-verified against `idp_metadata_url` (cross-checked that its
   `entityID` matches `issuer` — the SAML analogue of the JWT leg's
   issuer check), then a session cookie (`session_cookie`) is issued and

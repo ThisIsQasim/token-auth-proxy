@@ -112,7 +112,7 @@ timeouts:
 #           client_secret: "${env:PROXY_OIDC_CLIENT_SECRET}"  # omit for a public client (PKCE is always used)
 #           token_auth_method: client_secret_basic           # or client_secret_post; only with a secret
 #           sp_base_url: "https://proxy.example.com"         # required; the proxy's own origin
-#           callback_path: /oidc/callback                     # register sp_base_url + this as the redirect URI
+#           callback_path: /_tap/oidc/callback                     # register sp_base_url + this as the redirect URI
 #           # ACL claims can only match what the ID token carries, and many
 #           # IdPs only include groups when that scope is requested.
 #           scopes: [openid, profile, email, groups]        # default: openid profile email
@@ -180,7 +180,10 @@ timeouts:
 #       # for local dev/test only.
 #       sp_base_url: "https://proxy.example.com"
 #       sp_entity_id: "https://proxy.example.com/saml/metadata"
-#       acs_path: "/saml/corp-sso/acs"
+#       # Optional; defaults to /_tap/saml/acs, under the /_tap/ prefix the proxy
+#       # keeps for its own routes. Set it only to match an ACS URL already
+#       # registered with the IdP.
+#       # acs_path: "/_tap/saml/acs"
 #       session_cookie: "corp_sso_session"
 #       # Names an environment variable holding the session-signing
 #       # key — never the key itself in this file. It must already be

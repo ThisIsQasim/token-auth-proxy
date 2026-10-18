@@ -101,15 +101,29 @@ func extractBasic(r *http.Request) (username, password string, res basicExtracti
 // token's (unverified) iss claim, not by where it was found. Disabled
 // sources are skipped — their Credentials are never consulted.
 func extractToken(r *http.Request, auth config.InboundAuthConfig) (string, bool) {
-	for _, src := range auth.JWT {
+	raw, _, ok := extractTokenFrom(r, auth)
+	return raw, ok
+}
+
+// extractTokenFrom is extractToken that also reports the JWT source whose
+// browser login cookie the credential came from, or nil if it came from
+// anywhere else (a header, a query parameter, some other cookie). The
+// distinction matters for a rejected token: one the user sent on purpose
+// is a 401, but a stale login cookie is just a session to renew.
+func extractTokenFrom(r *http.Request, auth config.InboundAuthConfig) (string, *config.JWTSource, bool) {
+	for i := range auth.JWT {
+		src := &auth.JWT[i]
 		if src.Disabled {
 			continue
 		}
 		for _, loc := range src.Credentials {
 			if v, ok := extractFrom(r, loc); ok {
-				return v, true
+				if loc.Location == "cookie" && src.LoginEnabled() && loc.Name == src.Login.CookieName {
+					return v, src, true
+				}
+				return v, nil, true
 			}
 		}
 	}
-	return "", false
+	return "", nil, false
 }

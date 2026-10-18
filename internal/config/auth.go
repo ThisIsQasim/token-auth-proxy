@@ -486,7 +486,13 @@ type JWTLogin struct {
 }
 
 const (
-	defaultLoginCallbackPath = "/oidc/callback"
+	// defaultSAMLACSPath lives under /_tap/ with the other routes the proxy
+	// serves itself, so it cannot shadow a path of the backend.
+	defaultSAMLACSPath = "/_tap/saml/acs"
+
+	// defaultLoginCallbackPath lives under /_tap/ with the other routes the
+	// proxy serves itself, so it cannot shadow a path of the backend.
+	defaultLoginCallbackPath = "/_tap/oidc/callback"
 	defaultLoginCookieName   = "tap_id_token"
 	defaultRefreshMaxAge     = 30 * 24 * time.Hour
 
@@ -754,7 +760,7 @@ type SAMLSource struct {
 	IDPMetadataCacheTTL  time.Duration `yaml:"idp_metadata_cache_ttl,omitempty"`  // defaults to defaultIDPMetadataCacheTTL
 	SPBaseURL            string        `yaml:"sp_base_url,omitempty"`             // required — this proxy's own externally-reachable origin, e.g. "https://proxy.example.com"
 	SPEntityID           string        `yaml:"sp_entity_id,omitempty"`            // required — this proxy's own identity to the IdP
-	ACSPath              string        `yaml:"acs_path,omitempty"`                // required — where the IdP POSTs the SAMLResponse, relative to SPBaseURL
+	ACSPath              string        `yaml:"acs_path,omitempty"`                // defaults to defaultSAMLACSPath; where the IdP POSTs the SAMLResponse, relative to SPBaseURL
 	SessionCookie        string        `yaml:"session_cookie,omitempty"`          // required
 	SessionSigningKeyEnv string        `yaml:"session_signing_key_env,omitempty"` // required — NAME of an env var holding the signing key, never the key itself in YAML
 	SessionDuration      time.Duration `yaml:"session_duration,omitempty"`        // defaults to defaultSessionDuration
@@ -785,6 +791,9 @@ func (s *SAMLSource) applyDefaults() {
 	if s.IDPMetadataCacheTTL == 0 {
 		s.IDPMetadataCacheTTL = defaultIDPMetadataCacheTTL
 	}
+	if s.ACSPath == "" {
+		s.ACSPath = defaultSAMLACSPath
+	}
 }
 
 // validate checks a single SAMLSource in isolation (no cross-source
@@ -813,6 +822,9 @@ func (s *SAMLSource) validate() error {
 	}
 	if !strings.HasPrefix(s.ACSPath, "/") {
 		return fmt.Errorf("acs_path must begin with %q", "/")
+	}
+	if s.ACSPath == LoginPathPrefix || strings.HasPrefix(s.ACSPath, LoginPathPrefix+"/") {
+		return fmt.Errorf("acs_path must not be %q: that path is served by the proxy itself", s.ACSPath)
 	}
 	if s.ACSPath == "/healthz" {
 		return fmt.Errorf("acs_path must not be %q: that path is always served unauthenticated and never reaches inbound.auth", "/healthz")

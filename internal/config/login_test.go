@@ -22,7 +22,7 @@ func TestJWTLogin_Defaults(t *testing.T) {
 	j := validLoginSource()
 	require.NoError(t, j.validate())
 
-	assert.Equal(t, "/oidc/callback", j.Login.CallbackPath)
+	assert.Equal(t, "/_tap/oidc/callback", j.Login.CallbackPath)
 	assert.Equal(t, "tap_id_token", j.Login.CookieName)
 	assert.Equal(t, []string{"openid", "profile", "email"}, j.Login.Scopes)
 	assert.Equal(t, []string{"proxy"}, j.Audiences, "audiences default to the client id, the aud of the ID token")
@@ -113,7 +113,7 @@ func TestInboundAuth_LoginCrossChecks(t *testing.T) {
 	})
 
 	t.Run("saml collisions", func(t *testing.T) {
-		saml := &SAMLSource{ACSPath: "/oidc/callback", SessionCookie: "saml_session"}
+		saml := &SAMLSource{ACSPath: "/_tap/oidc/callback", SessionCookie: "saml_session"}
 		cfg := InboundAuthConfig{JWT: []JWTSource{a}, SAML: saml}
 		err := cfg.Validate()
 		require.Error(t, err)
@@ -184,5 +184,23 @@ func TestJWTLogin_CookieNameValidation(t *testing.T) {
 		} else {
 			assert.Error(t, err, name)
 		}
+	}
+}
+
+func TestSAMLSource_ACSPathDefault(t *testing.T) {
+	s := SAMLSource{}
+	s.applyDefaults()
+	assert.Equal(t, "/_tap/saml/acs", s.ACSPath)
+
+	s = SAMLSource{ACSPath: "/custom/acs"}
+	s.applyDefaults()
+	assert.Equal(t, "/custom/acs", s.ACSPath, "an explicit path is kept")
+}
+
+func TestSAMLSource_ACSPathNotUnderLoginPrefix(t *testing.T) {
+	for _, p := range []string{"/_tap/login", "/_tap/login/saml"} {
+		s := validSAMLSource(t)
+		s.ACSPath = p
+		assert.ErrorContains(t, s.validate(), "served by the proxy itself", p)
 	}
 }

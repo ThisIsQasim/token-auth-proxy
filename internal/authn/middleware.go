@@ -27,6 +27,7 @@ const (
 	jwtNoCredential jwtOutcome = iota // nothing extracted; caller decides what happens next
 	jwtAllowed                        // a credential was presented and verified
 	jwtRejected                       // a credential was presented and failed; response already written
+	jwtStale                          // the login cookie failed verification; nothing written, caller renews or drops it
 )
 
 // enforceJWT applies JWT verification to r using cfg/reg, writing a
@@ -45,13 +46,23 @@ const (
 // report over an ordinary verification failure on another (see the
 // candidate loop below for why).
 func enforceJWT(w http.ResponseWriter, r *http.Request, cfg *config.Config, reg *Registry, logger *slog.Logger) (jwtOutcome, *principal) {
-	raw, ok := extractToken(r, cfg.Inbound.Auth)
+	raw, loginSrc, ok := extractTokenFrom(r, cfg.Inbound.Auth)
 	if !ok {
 		return jwtNoCredential, nil
 	}
 
+	// A token from a browser login cookie that fails verification (expired
+	// by the server's clock, signed by a rotated-out key, ...) is a session
+	// to renew, not a client error: the caller drops the cookie and refreshes
+	// or logs in again. A credential presented any other way is still a 401,
+	// and so is a failure to fetch keys, which no new token would fix.
+	stale := func(why reason) bool { return loginSrc != nil && why != reasonKeysUnavailable }
+
 	iss, err := unverifiedIssuer(raw)
 	if err != nil {
+		if stale(reasonMalformedToken) {
+			return jwtStale, nil
+		}
 		reject(w, logger, r, reasonMalformedToken)
 		return jwtRejected, nil
 	}
@@ -59,6 +70,9 @@ func enforceJWT(w http.ResponseWriter, r *http.Request, cfg *config.Config, reg 
 
 	candidates := cfg.Inbound.Auth.JWTSourcesByIssuer(iss)
 	if len(candidates) == 0 {
+		if stale(reasonUnknownIssuer) {
+			return jwtStale, nil
+		}
 		reject(w, logger, r, reasonUnknownIssuer, "issuer", loggedIss)
 		return jwtRejected, nil
 	}
@@ -105,6 +119,9 @@ func enforceJWT(w http.ResponseWriter, r *http.Request, cfg *config.Config, reg 
 		return jwtAllowed, jwtPrincipal(src, claims)
 	}
 
+	if stale(reportReason) {
+		return jwtStale, nil
+	}
 	reject(w, logger, r, reportReason, reportArgs...)
 	return jwtRejected, nil
 }
@@ -248,6 +265,16 @@ func NewMiddleware(source ConfigSource, jwtReg *Registry, samlReg *SAMLRegistry,
 					return
 				}
 				outcome, p := enforceJWT(w, r, cfg, jwtReg, logger)
+				if outcome == jwtStale {
+					// Drop the stale login cookie, then try to renew the session
+					// with the refresh token; failing that, the request is simply
+					// credential-less and falls through to login or the 401 below.
+					loginReg.DropStaleLogin(w, r, cfg)
+					if loginReg.Refresh(w, r, cfg, refreshTokens) {
+						return
+					}
+					outcome, p = enforceJWT(w, r, cfg, jwtReg, logger)
+				}
 				switch outcome {
 				case jwtAllowed:
 					// Forwarded byte-for-byte unchanged: no identity
@@ -259,6 +286,11 @@ func NewMiddleware(source ConfigSource, jwtReg *Registry, samlReg *SAMLRegistry,
 					}
 					return
 				case jwtRejected:
+					return
+				case jwtStale:
+					// Unreachable: the stale cookie was dropped above, so
+					// enforceJWT cannot report it again.
+					reject(w, logger, r, reasonInvalidClaims)
 					return
 				case jwtNoCredential:
 					// Fall through to step 4/5 below.

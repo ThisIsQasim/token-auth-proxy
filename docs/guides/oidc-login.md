@@ -8,7 +8,7 @@ and verifies it on every request like any other JWT.
 
 Create an OIDC client for the proxy and register the redirect URI
 `<sp_base_url><callback_path>`, for example
-`https://proxy.example.com/oidc/callback`.
+`https://proxy.example.com/_tap/oidc/callback`.
 
 - **Confidential client**: the IdP gives you a client secret.
 - **Public client**: no secret; the IdP must allow PKCE (S256).
@@ -38,7 +38,7 @@ inbound:
 | `client_secret` | none | Makes it a confidential client. Use `${env:NAME}` or `${file:PATH}`. Omit for a public client |
 | `token_auth_method` | `client_secret_basic` | `client_secret_basic` or `client_secret_post`; only with a secret |
 | `sp_base_url` | required | The proxy's own origin as the browser sees it |
-| `callback_path` | `/oidc/callback` | Register `sp_base_url + callback_path` as the redirect URI |
+| `callback_path` | `/_tap/oidc/callback` | Register `sp_base_url + callback_path` as the redirect URI |
 | `scopes` | `openid profile email` | Requested scopes; must include `openid` |
 | `cookie_name` | `tap_id_token` | The ID token cookie; letters, digits and `!#$%&'*+-.^_`|~` only, and not starting with `tap_login_` |
 | `label` | the source name | Button text on the login picker |
@@ -75,7 +75,7 @@ login:
 
 1. A browser with no cookie asks for `/dashboards`.
 2. The proxy redirects it to the IdP, which signs the user in.
-3. The IdP redirects to `/oidc/callback`; the proxy verifies the token,
+3. The IdP redirects to `/_tap/oidc/callback`; the proxy verifies the token,
    sets the `tap_id_token` cookie and sends the browser to `/dashboards`.
 
 The session ends when the ID token expires, and the user signs in again,
@@ -125,7 +125,7 @@ inbound:
         login:
           client_id: proxy-b
           sp_base_url: https://proxy.example.com
-          callback_path: /oidc/google/callback
+          callback_path: /_tap/oidc/google/callback
           cookie_name: tap_id_token_google
           scopes: [openid, email]
 ```

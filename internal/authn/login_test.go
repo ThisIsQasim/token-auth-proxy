@@ -1,6 +1,8 @@
 package authn
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -11,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -49,7 +52,7 @@ func newLoginEnv(t *testing.T, o loginOpts) *loginEnv {
 	e.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { handler.ServeHTTP(w, r) }))
 	t.Cleanup(e.server.Close)
 
-	lg := &config.JWTLogin{ClientID: loginClientID, SPBaseURL: e.server.URL, CallbackPath: "/oidc/callback", CookieName: "tap_id_token", Scopes: []string{"openid", "profile"}}
+	lg := &config.JWTLogin{ClientID: loginClientID, SPBaseURL: e.server.URL, CallbackPath: "/_tap/oidc/callback", CookieName: "tap_id_token", Scopes: []string{"openid", "profile"}}
 	if o.refresh {
 		lg.Refresh, lg.RefreshMaxAge = true, 24*time.Hour
 		lg.Scopes = append(lg.Scopes, "offline_access")
@@ -198,7 +201,7 @@ func TestLogin_RedirectsToIdPWithPKCEAndNonce(t *testing.T) {
 	assert.NotEmpty(t, q.Get("code_challenge"))
 	assert.NotEmpty(t, q.Get("state"))
 	assert.NotEmpty(t, q.Get("nonce"))
-	assert.Equal(t, e.server.URL+"/oidc/callback", q.Get("redirect_uri"))
+	assert.Equal(t, e.server.URL+"/_tap/oidc/callback", q.Get("redirect_uri"))
 	assert.Equal(t, "openid profile", q.Get("scope"))
 
 	var state *http.Cookie
@@ -218,23 +221,23 @@ func TestLogin_CallbackRejections(t *testing.T) {
 		status int
 	}{
 		"no state cookie": {
-			path:   func(string) string { return "/oidc/callback?code=x&state=y" },
+			path:   func(string) string { return "/_tap/oidc/callback?code=x&state=y" },
 			status: http.StatusBadRequest,
 		},
 		"state mismatch": {
-			path:   func(string) string { return "/oidc/callback?code=x&state=wrong" },
+			path:   func(string) string { return "/_tap/oidc/callback?code=x&state=wrong" },
 			status: http.StatusBadRequest,
 		},
 		"idp error": {
-			path:   func(s string) string { return "/oidc/callback?error=access_denied&state=" + s },
+			path:   func(s string) string { return "/_tap/oidc/callback?error=access_denied&state=" + s },
 			status: http.StatusForbidden,
 		},
 		"missing code": {
-			path:   func(s string) string { return "/oidc/callback?state=" + s },
+			path:   func(s string) string { return "/_tap/oidc/callback?state=" + s },
 			status: http.StatusBadRequest,
 		},
 		"bad code": {
-			path:   func(s string) string { return "/oidc/callback?code=bogus&state=" + s },
+			path:   func(s string) string { return "/_tap/oidc/callback?code=bogus&state=" + s },
 			status: http.StatusBadGateway,
 		},
 	}
@@ -664,4 +667,102 @@ func TestLogin_DiscoveryOutageServesStaleEndpoints(t *testing.T) {
 	resp, _ = e.get(t, c, "/", nil)
 	require.Equal(t, http.StatusFound, resp.StatusCode)
 	assert.True(t, strings.HasPrefix(resp.Header.Get("Location"), e.idp.AuthorizeURL()))
+}
+
+// setIDCookie replaces the ID token cookie in c's jar with value, as if the
+// browser still held a token the proxy no longer accepts.
+func (e *loginEnv) setIDCookie(t *testing.T, c *http.Client, value string) {
+	t.Helper()
+	u, err := url.Parse(e.server.URL)
+	require.NoError(t, err)
+	c.Jar.SetCookies(u, []*http.Cookie{{Name: "tap_id_token", Value: value, Path: "/", MaxAge: 3600}})
+}
+
+func TestStale_ExpiredByServerClockIsRenewed(t *testing.T) {
+	e := newLoginEnv(t, loginOpts{refresh: true, rotate: true})
+	c := e.client(t, true)
+	e.get(t, c, "/", nil)
+
+	// The browser still holds the cookie (its clock is behind), but the
+	// token inside has expired by the proxy's clock.
+	e.setIDCookie(t, c, e.idp.MintLoginToken(t, loginClientID, -time.Minute, nil))
+	before := e.idp.RefreshCalls()
+
+	resp, body := e.get(t, c, "/api/x", map[string]string{"Accept": "application/json"})
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "backend:/api/x", body)
+	assert.Equal(t, before+1, e.idp.RefreshCalls())
+
+	resp, _ = e.get(t, c, "/api/y", nil)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, before+1, e.idp.RefreshCalls(), "the renewed cookie replaced the stale one")
+}
+
+func TestStale_SignedByUnknownKeyIsRenewed(t *testing.T) {
+	e := newLoginEnv(t, loginOpts{refresh: true, rotate: true})
+	c := e.client(t, true)
+	e.get(t, c, "/", nil)
+
+	// What a cookie signed by a key the IdP no longer publishes looks like.
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	claims := jwt.MapClaims{"iss": e.idp.Issuer, "aud": loginClientID, "sub": "user-1", "exp": time.Now().Add(time.Hour).Unix()}
+	e.setIDCookie(t, c, e.idp.SignWith(t, jwt.SigningMethodRS256, key, claims))
+
+	resp, body := e.get(t, c, "/p", nil)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "backend:/p", body)
+	assert.Equal(t, 1, e.idp.RefreshCalls(), "the rejected cookie was renewed, not accepted")
+}
+
+func TestStale_GarbageCookieWithoutRefreshFallsBackToLogin(t *testing.T) {
+	e := newLoginEnv(t, loginOpts{})
+	c := e.client(t, false)
+	e.setIDCookie(t, c, "not.a.jwt")
+
+	// A browser goes through login again instead of getting stuck on 401...
+	resp, _ := e.get(t, c, "/page", nil)
+	require.Equal(t, http.StatusFound, resp.StatusCode)
+	assert.True(t, strings.HasPrefix(resp.Header.Get("Location"), e.idp.AuthorizeURL()))
+	var cleared bool
+	for _, ck := range resp.Cookies() {
+		if ck.Name == "tap_id_token" && ck.MaxAge < 0 {
+			cleared = true
+		}
+	}
+	assert.True(t, cleared, "the stale cookie is deleted from the browser")
+
+	// ...and an API client gets the plain 401.
+	e.setIDCookie(t, c, "not.a.jwt")
+	resp, _ = e.get(t, c, "/api", map[string]string{"Accept": "application/json"})
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	assert.Zero(t, e.backend.Load())
+}
+
+func TestStale_BearerHeaderStillGets401(t *testing.T) {
+	e := newLoginEnv(t, loginOpts{refresh: true})
+	c := e.client(t, true)
+	e.get(t, c, "/", nil)
+	before := e.idp.RefreshCalls()
+
+	// A token presented on purpose is a client error, not a session to
+	// renew, even when a valid login cookie rides along.
+	bad := e.idp.MintLoginToken(t, loginClientID, -time.Minute, nil)
+	resp, _ := e.get(t, e.client(t, false), "/", map[string]string{"Authorization": "Bearer " + bad, "Accept": "application/json"})
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	assert.Equal(t, before, e.idp.RefreshCalls())
+}
+
+func TestStale_OtherSourcesCookieIsKept(t *testing.T) {
+	e := newLoginEnv(t, loginOpts{refresh: true})
+	c := e.client(t, true)
+	e.get(t, c, "/", nil)
+	e.expireSession(t, c)
+	e.setIDCookie(t, c, "garbage")
+	u, _ := url.Parse(e.server.URL)
+	c.Jar.SetCookies(u, []*http.Cookie{{Name: "unrelated", Value: "keep", Path: "/", MaxAge: 3600}})
+
+	resp, _ := e.get(t, c, "/", nil)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, resp.Header.Get("X-Seen-Cookies"), "unrelated", "only the stale login cookie is removed from the request")
 }
