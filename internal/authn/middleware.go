@@ -95,6 +95,7 @@ func enforceJWT(w http.ResponseWriter, r *http.Request, cfg *config.Config, reg 
 	// exercises a working sibling source afterward.
 	var reportReason reason
 	var reportArgs []any
+	var keysErr error
 	haveKeysUnavailable := false
 	for _, src := range candidates {
 		kf, err := reg.Keyfunc(r.Context(), src)
@@ -102,6 +103,7 @@ func enforceJWT(w http.ResponseWriter, r *http.Request, cfg *config.Config, reg 
 			if !haveKeysUnavailable {
 				reportReason = reasonKeysUnavailable
 				reportArgs = []any{"source", src.Name, "err", err}
+				keysErr = fmt.Errorf("source %q: %w", src.Name, err)
 				haveKeysUnavailable = true
 			}
 			continue
@@ -121,6 +123,14 @@ func enforceJWT(w http.ResponseWriter, r *http.Request, cfg *config.Config, reg 
 
 	if stale(reportReason) {
 		return jwtStale, nil
+	}
+	// Not the caller's fault and nothing it can fix by sending a different
+	// token: the keys could not be fetched. A 401 invalid_token would tell a
+	// client to discard a perfectly good credential, so say so with a 503 and
+	// when to retry, as the SAML and login legs do.
+	if reportReason == reasonKeysUnavailable {
+		rejectUnavailable(w, logger, r, reasonKeysUnavailable, keysErr, reg.retry)
+		return jwtRejected, nil
 	}
 	reject(w, logger, r, reportReason, reportArgs...)
 	return jwtRejected, nil

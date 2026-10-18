@@ -434,11 +434,10 @@ func (h *recordingHandler) last(t *testing.T) (reason string, level slog.Level) 
 // one actually tried last) to fail for the ordinary reason (wrong key) -
 // proving the reported reason isn't simply "whichever failed last".
 //
-// The response body can't distinguish the two (both are a bare 401
-// "unauthorized" - see reason's doc comment), so this asserts on the
-// structured log line instead: reason=keys_unavailable at Warn level,
-// not the ordinary reason at Info level rejectChallenges would otherwise
-// log for a routine bad-signature failure.
+// The reported reason decides the response: keys_unavailable is a 503 with
+// Retry-After (the caller's token was never judged), where the ordinary
+// bad-signature failure would be a 401. It also logs at Warn level, not the
+// Info level rejectChallenges uses for a routine failure.
 func TestMiddleware_MultipleSourcesShareIssuer_KeysUnavailableReasonWins(t *testing.T) {
 	const sharedIssuer = "https://shared-issuer.example.com"
 
@@ -484,7 +483,9 @@ func TestMiddleware_MultipleSourcesShareIssuer_KeysUnavailableReasonWins(t *test
 	rec := httptest.NewRecorder()
 	mw(backend.Handler()).ServeHTTP(rec, bearerRequest(t, token))
 
-	assertRejected(t, rec, backend, 0, http.StatusUnauthorized, "unauthorized")
+	assertRejected(t, rec, backend, 0, http.StatusServiceUnavailable, "service unavailable")
+	assert.NotEmpty(t, rec.Header().Get("Retry-After"), "a client needs to know when to retry")
+	assert.Empty(t, rec.Header().Values("WWW-Authenticate"), "the token was not found invalid, so no invalid_token challenge")
 
 	loggedReason, level := handler.last(t)
 	assert.Equal(t, string(reasonKeysUnavailable), loggedReason, "the first candidate's operator-actionable failure must win over the second's routine one")
@@ -902,4 +903,28 @@ func TestMiddleware_BasicOnly_UnknownUserRejects(t *testing.T) {
 	assert.Equal(t, `Basic realm="test-realm", charset="UTF-8"`, rec.Header().Get("WWW-Authenticate"),
 		"an unknown user is answered identically to a wrong password")
 	assertRejected(t, rec, backend, 0, http.StatusUnauthorized, "unauthorized")
+}
+
+// A source whose keys can't be fetched yields a 503, not a 401, for a
+// perfectly good token: the failure is the proxy's, and a 401
+// invalid_token would tell the client to throw its credential away.
+func TestMiddleware_KeysUnavailableIs503NotInvalidToken(t *testing.T) {
+	idp := NewTestIDP(t)
+	src := jwtSourceFor(idp)
+	src.JWKSURL = ""
+	src.OIDCDiscoveryURL = "http://127.0.0.1:1/.well-known/openid-configuration"
+
+	backend := &backendStub{}
+	source := newFakeSource(t, &config.Config{Inbound: config.InboundConfig{Auth: config.InboundAuthConfig{JWT: []config.JWTSource{src}}}})
+	reg := NewRegistry(testLogger())
+	t.Cleanup(reg.Close)
+	mw := newTestMiddleware(t, source, reg)
+
+	token := idp.Sign(t, jwt.RegisteredClaims{Issuer: idp.Issuer, ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour))})
+	rec := httptest.NewRecorder()
+	mw(backend.Handler()).ServeHTTP(rec, bearerRequest(t, token))
+
+	assertRejected(t, rec, backend, 0, http.StatusServiceUnavailable, "service unavailable")
+	assert.Equal(t, "30", rec.Header().Get("Retry-After"))
+	assert.Empty(t, rec.Header().Values("WWW-Authenticate"))
 }

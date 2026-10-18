@@ -261,9 +261,12 @@ interacts with a `--config` file's own value.
   on algorithm confusion attacks).
 - **Tokens with no `exp` claim are always rejected.** There's no way to
   configure around this.
-- **A JWKS fetch that fails is a `401`, not a `503`.** An unreachable
-  or untrusted `jwks_url` looks identical to a bad token from the
-  client's side; the proxy's logs name the real cause.
+- **A JWKS fetch that fails is a `503`, not a `401`.** If the keys can't be
+  fetched (the JWKS or discovery endpoint is unreachable or untrusted) the
+  token was never judged, so the proxy answers `503` with `Retry-After`
+  and no `invalid_token` challenge, and logs `keys_unavailable` at warn
+  level. A client should retry, not throw its token away. The failure is
+  remembered for 30 seconds so a down endpoint isn't hit on every request.
 - **The rejection reason never reaches the client** — only a generic
   `401` and `WWW-Authenticate` header. Check the proxy's own logs (or
   `authn_rejections_total{reason="..."}` — see the

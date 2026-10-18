@@ -203,6 +203,10 @@ over; see below for how the two combine.
   invalid) and a minimal plaintext body — the specific reason
   (expired, wrong issuer, bad signature, ...) is never included in the
   response, only in the proxy's own structured logs.
+- **When the keys can't be fetched**: `503` with `Retry-After` (30 seconds, the
+  resolver's retry window) and no `WWW-Authenticate`, logged as
+  `keys_unavailable` at warn level. The token was never judged, so this is
+  not a `401 invalid_token`.
 - **Limitation**: a `query`-location credential is forwarded to the
   backend as part of the URL, which [RFC 6750 §2.3](https://www.rfc-editor.org/rfc/rfc6750#section-2.3)
   discourages (it can end up in access logs, `Referer` headers, browser
