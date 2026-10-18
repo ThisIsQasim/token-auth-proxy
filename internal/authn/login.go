@@ -15,19 +15,24 @@ import (
 	"sync"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/oauth2"
 
 	"github.com/ThisIsQasim/token-auth-proxy/internal/config"
 )
 
 const (
-	// loginStateCookie carries the in-flight authorization request
+	// loginStateCookie prefixes the cookies carrying the in-flight authorization request
 	// (state, nonce, PKCE verifier, where to return to) from the redirect
 	// to the callback. Unsigned: every value in it is either compared
 	// against what the IdP echoes back or only ever used by this proxy,
 	// and return_to is sanitized again at the callback.
 	loginStateCookie = "tap_login_state"
 	loginStateTTL    = 10 * time.Minute
+
+	// loginStateKeyLen is how many leading characters of the state value
+	// name its cookie (see loginStateCookieName).
+	loginStateKeyLen = 12
 
 	// loginEndpointsTTL bounds how long a discovery result is reused;
 	// loginRetry is the negative-cache window after a failed fetch.
@@ -53,10 +58,18 @@ type loginEndpoints struct {
 	authURL  string
 	tokenURL string
 	client   *http.Client
-	fp       string
 	expires  time.Time
-	lastErr  error
-	nextTry  time.Time
+}
+
+// loginSlot is one source's discovery cache. Its own mutex is held across
+// the fetch, so concurrent callers for the same source share one fetch
+// while other sources are never blocked by it.
+type loginSlot struct {
+	mu      sync.Mutex
+	fp      string
+	good    *loginEndpoints // last successful fetch; kept serving if a refetch fails
+	failErr error
+	nextTry time.Time
 }
 
 // LoginRegistry runs the OIDC authorization code flow for JWT sources
@@ -67,8 +80,8 @@ type LoginRegistry struct {
 	logger *slog.Logger
 	now    func() time.Time
 
-	mu      sync.Mutex
-	entries map[string]*loginEndpoints
+	mu    sync.Mutex
+	slots map[string]*loginSlot
 
 	refreshMu    sync.Mutex
 	refreshCalls map[string]*refreshCall
@@ -80,7 +93,7 @@ func NewLoginRegistry(jwt *Registry, logger *slog.Logger) *LoginRegistry {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &LoginRegistry{jwt: jwt, logger: logger, now: time.Now, entries: map[string]*loginEndpoints{}, refreshCalls: map[string]*refreshCall{}}
+	return &LoginRegistry{jwt: jwt, logger: logger, now: time.Now, slots: map[string]*loginSlot{}, refreshCalls: map[string]*refreshCall{}}
 }
 
 func loginFingerprint(src config.JWTSource) string {
@@ -89,57 +102,84 @@ func loginFingerprint(src config.JWTSource) string {
 
 // endpoints returns the authorization and token endpoints for src from
 // its discovery document, cached per source. A failed fetch is cached
-// briefly so an unreachable IdP doesn't get a fetch per request.
+// briefly so an unreachable IdP doesn't get a fetch per request, and if
+// an earlier fetch succeeded its result keeps being served meanwhile:
+// endpoints almost never change, so a blip at the TTL boundary must not
+// break logins.
 func (l *LoginRegistry) endpoints(ctx context.Context, src config.JWTSource) (*loginEndpoints, error) {
 	fp := loginFingerprint(src)
 
 	l.mu.Lock()
-	defer l.mu.Unlock()
+	slot := l.slots[src.Name]
+	if slot == nil {
+		slot = &loginSlot{}
+		l.slots[src.Name] = slot
+	}
+	l.mu.Unlock()
 
-	e := l.entries[src.Name]
-	if e != nil && e.fp == fp {
-		if e.lastErr == nil && l.now().Before(e.expires) {
-			return e, nil
+	slot.mu.Lock()
+	defer slot.mu.Unlock()
+
+	if slot.fp != fp {
+		if slot.good != nil {
+			slot.good.client.CloseIdleConnections()
 		}
-		if e.lastErr != nil && l.now().Before(e.nextTry) {
-			return nil, e.lastErr
+		slot.fp, slot.good, slot.failErr, slot.nextTry = fp, nil, nil, time.Time{}
+	}
+	if slot.good != nil && l.now().Before(slot.good.expires) {
+		return slot.good, nil
+	}
+	if slot.failErr != nil && l.now().Before(slot.nextTry) {
+		if slot.good != nil {
+			return slot.good, nil
 		}
-	}
-	if e != nil && e.fp != fp && e.client != nil {
-		e.client.CloseIdleConnections()
+		return nil, slot.failErr
 	}
 
-	fail := func(err error) error {
-		l.entries[src.Name] = &loginEndpoints{fp: fp, lastErr: err, nextTry: l.now().Add(loginRetry)}
-		return err
+	e, err := l.fetchEndpoints(ctx, src)
+	if err != nil {
+		slot.failErr, slot.nextTry = err, l.now().Add(loginRetry)
+		if slot.good != nil {
+			l.logger.WarnContext(ctx, "oidc discovery refresh failed, serving the previous endpoints", "source", src.Name, "err", err)
+			return slot.good, nil
+		}
+		return nil, err
 	}
+	if slot.good != nil {
+		slot.good.client.CloseIdleConnections()
+	}
+	slot.good, slot.failErr = e, nil
+	return e, nil
+}
 
+// fetchEndpoints fetches src's discovery document. Its context is
+// detached from the request that happened to trigger it: the result is
+// shared, so one client hanging up must not fail (and negative-cache) the
+// fetch for everyone else.
+func (l *LoginRegistry) fetchEndpoints(ctx context.Context, src config.JWTSource) (*loginEndpoints, error) {
 	client := &http.Client{Timeout: loginHTTPTimeout}
 	if src.CACert != "" {
 		c, err := newCACertClient(src.CACert)
 		if err != nil {
-			return nil, fail(fmt.Errorf("build ca_cert trust roots: %w", err))
+			return nil, fmt.Errorf("build ca_cert trust roots: %w", err)
 		}
 		client = c
 	}
 
-	fetchCtx, cancel := context.WithTimeout(ctx, loginHTTPTimeout)
+	fetchCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), loginHTTPTimeout)
 	defer cancel()
 	doc, err := fetchDiscovery(fetchCtx, client, src.OIDCDiscoveryURL, src.Issuer)
 	if err != nil {
 		client.CloseIdleConnections()
-		return nil, fail(fmt.Errorf("resolve oidc discovery: %w", err))
+		return nil, fmt.Errorf("resolve oidc discovery: %w", err)
 	}
 	for name, v := range map[string]string{"authorization_endpoint": doc.AuthorizationEndpoint, "token_endpoint": doc.TokenEndpoint} {
 		if err := validateAbsoluteHTTPURL(v); err != nil {
 			client.CloseIdleConnections()
-			return nil, fail(fmt.Errorf("discovery document %s: %w", name, err))
+			return nil, fmt.Errorf("discovery document %s: %w", name, err)
 		}
 	}
-
-	e = &loginEndpoints{authURL: doc.AuthorizationEndpoint, tokenURL: doc.TokenEndpoint, client: client, fp: fp, expires: l.now().Add(loginEndpointsTTL)}
-	l.entries[src.Name] = e
-	return e, nil
+	return &loginEndpoints{authURL: doc.AuthorizationEndpoint, tokenURL: doc.TokenEndpoint, client: client, expires: l.now().Add(loginEndpointsTTL)}, nil
 }
 
 func (l *LoginRegistry) oauthConfig(src config.JWTSource, e *loginEndpoints) *oauth2.Config {
@@ -169,6 +209,27 @@ func randomToken() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
+// loginCookie builds a cookie with the attributes every cookie this proxy
+// sets shares. A negative maxAge deletes it.
+func loginCookie(src config.JWTSource, name, value string, maxAge int) *http.Cookie {
+	return &http.Cookie{ //nolint:gosec // Secure follows the https-ness of sp_base_url, which may legitimately be http in local dev
+		Name:     name,
+		Value:    value,
+		Path:     "/",
+		MaxAge:   maxAge,
+		HttpOnly: true,
+		Secure:   loginSecure(src),
+		SameSite: http.SameSiteLaxMode,
+	}
+}
+
+// loginStateCookieName keys the in-flight state cookie by the first
+// characters of the state value, so two logins started in the same
+// browser (two tabs) don't overwrite each other's.
+func loginStateCookieName(state string) string {
+	return loginStateCookie + "_" + state[:loginStateKeyLen]
+}
+
 // Start redirects the browser to src's IdP, remembering returnTo.
 func (l *LoginRegistry) Start(w http.ResponseWriter, r *http.Request, src config.JWTSource, returnTo string) {
 	e, err := l.endpoints(r.Context(), src)
@@ -186,21 +247,45 @@ func (l *LoginRegistry) Start(w http.ResponseWriter, r *http.Request, src config
 	verifier := oauth2.GenerateVerifier()
 
 	raw, _ := json.Marshal(loginState{Source: src.Name, State: state, Nonce: nonce, Verifier: verifier, ReturnTo: sanitizeReturnTo(returnTo)})
-	http.SetCookie(w, &http.Cookie{ //nolint:gosec // Secure follows the https-ness of sp_base_url, which may legitimately be http in local dev
-		Name:     loginStateCookie,
-		Value:    base64.RawURLEncoding.EncodeToString(raw),
-		Path:     "/",
-		MaxAge:   int(loginStateTTL.Seconds()),
-		HttpOnly: true,
-		Secure:   loginSecure(src),
-		SameSite: http.SameSiteLaxMode,
-	})
+	http.SetCookie(w, loginCookie(src, loginStateCookieName(state), base64.RawURLEncoding.EncodeToString(raw), int(loginStateTTL.Seconds())))
 
 	authURL := l.oauthConfig(src, e).AuthCodeURL(state,
 		oauth2.S256ChallengeOption(verifier),
 		oauth2.SetAuthURLParam("nonce", nonce))
 	w.Header().Set("Cache-Control", "no-store")
 	http.Redirect(w, r, authURL, http.StatusFound)
+}
+
+// errKeysUnavailable marks a token that could not be checked because the
+// source's signing keys could not be fetched, as opposed to one that
+// failed the check.
+var errKeysUnavailable = errors.New("signing keys unavailable")
+
+// verifyIDToken verifies raw under src's policy and returns its claims
+// and the cookie lifetime it allows. It is the one place both the login
+// callback and the refresh path decide whether an ID token is usable as
+// a session.
+func (l *LoginRegistry) verifyIDToken(ctx context.Context, src config.JWTSource, raw string) (jwt.MapClaims, int, error) {
+	kf, err := l.jwt.Keyfunc(ctx, src)
+	if err != nil {
+		return nil, 0, fmt.Errorf("%w: %w", errKeysUnavailable, err)
+	}
+	claims, err := verify(raw, src, kf)
+	if err != nil {
+		return nil, 0, fmt.Errorf("id token: %s", classify(err))
+	}
+	exp, err := claims.GetExpirationTime()
+	if err != nil || exp == nil {
+		return nil, 0, errors.New("id token has no exp")
+	}
+	maxAge := int(time.Until(exp.Time).Seconds())
+	if maxAge <= 0 {
+		return nil, 0, errors.New("id token already expired")
+	}
+	if len(raw) > maxCookieValueLen {
+		return nil, 0, fmt.Errorf("id token is %d bytes, too large for a cookie", len(raw))
+	}
+	return claims, maxAge, nil
 }
 
 // Callback completes the flow: it checks state, exchanges the code (with
@@ -210,22 +295,27 @@ func (l *LoginRegistry) Start(w http.ResponseWriter, r *http.Request, src config
 func (l *LoginRegistry) Callback(w http.ResponseWriter, r *http.Request, src config.JWTSource) {
 	w.Header().Set("Cache-Control", "no-store")
 
-	c, err := r.Cookie(loginStateCookie)
+	q := r.URL.Query()
+	stateParam := q.Get("state")
+	if len(stateParam) < loginStateKeyLen {
+		l.fail(w, r, http.StatusBadRequest, "login session invalid, try again", errors.New("missing or short state"))
+		return
+	}
+	cookieName := loginStateCookieName(stateParam)
+	c, err := r.Cookie(cookieName)
 	if err != nil {
 		l.fail(w, r, http.StatusBadRequest, "login session expired, try again", errors.New("missing state cookie"))
 		return
 	}
 	// Single use: cleared whatever happens below.
-	http.SetCookie(w, &http.Cookie{Name: loginStateCookie, Path: "/", MaxAge: -1, HttpOnly: true, Secure: loginSecure(src), SameSite: http.SameSiteLaxMode}) //nolint:gosec // see Start
+	http.SetCookie(w, loginCookie(src, cookieName, "", -1))
 
 	var st loginState
 	if raw, err := base64.RawURLEncoding.DecodeString(c.Value); err != nil || json.Unmarshal(raw, &st) != nil || st.Source != src.Name {
 		l.fail(w, r, http.StatusBadRequest, "login session invalid, try again", errors.New("malformed state cookie"))
 		return
 	}
-
-	q := r.URL.Query()
-	if subtle.ConstantTimeCompare([]byte(q.Get("state")), []byte(st.State)) != 1 || st.State == "" {
+	if subtle.ConstantTimeCompare([]byte(stateParam), []byte(st.State)) != 1 || st.State == "" {
 		l.fail(w, r, http.StatusBadRequest, "login session invalid, try again", errors.New("state mismatch"))
 		return
 	}
@@ -258,32 +348,17 @@ func (l *LoginRegistry) Callback(w http.ResponseWriter, r *http.Request, src con
 		return
 	}
 
-	kf, err := l.jwt.Keyfunc(ctx, src)
-	if err != nil {
+	claims, maxAge, err := l.verifyIDToken(ctx, src, rawID)
+	if errors.Is(err, errKeysUnavailable) {
 		rejectUnavailable(w, l.logger, r, reasonKeysUnavailable, err, loginRetry)
 		return
 	}
-	claims, err := verify(rawID, src, kf)
 	if err != nil {
-		l.fail(w, r, http.StatusForbidden, "login failed", fmt.Errorf("id token: %s", classify(err)))
+		l.fail(w, r, http.StatusForbidden, "login failed", err)
 		return
 	}
 	if n, _ := claims["nonce"].(string); subtle.ConstantTimeCompare([]byte(n), []byte(st.Nonce)) != 1 {
 		l.fail(w, r, http.StatusForbidden, "login failed", errors.New("id token nonce mismatch"))
-		return
-	}
-	exp, err := claims.GetExpirationTime()
-	if err != nil || exp == nil {
-		l.fail(w, r, http.StatusForbidden, "login failed", errors.New("id token has no exp"))
-		return
-	}
-	maxAge := int(time.Until(exp.Time).Seconds())
-	if maxAge <= 0 {
-		l.fail(w, r, http.StatusForbidden, "login failed", errors.New("id token already expired"))
-		return
-	}
-	if len(rawID) > maxCookieValueLen {
-		l.fail(w, r, http.StatusInternalServerError, "login failed", fmt.Errorf("id token is %d bytes, too large for a cookie", len(rawID)))
 		return
 	}
 

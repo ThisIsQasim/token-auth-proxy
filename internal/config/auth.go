@@ -522,7 +522,12 @@ func (a InboundAuthConfig) LoginSources() []JWTSource {
 // can sign in: SAML, Basic, and one per JWT source with browser login.
 // More than one means the user is shown a picker.
 func (a InboundAuthConfig) LoginMethodCount() int {
-	n := len(a.LoginSources())
+	n := 0
+	for i := range a.JWT {
+		if a.JWT[i].LoginEnabled() {
+			n++
+		}
+	}
 	if a.SAMLEnabled() {
 		n++
 	}
@@ -552,6 +557,25 @@ func (l *JWTLogin) applyDefaults() {
 
 // RefreshCookieName is the cookie holding the refresh token.
 func (l JWTLogin) RefreshCookieName() string { return l.CookieName + "_refresh" }
+
+// validCookieName reports whether s is a non-empty RFC 6265 token. net/http
+// silently drops a cookie with any other name, which would turn a bad
+// cookie_name into an endless login redirect loop.
+func validCookieName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= '0' && c <= '9', c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z':
+		case strings.IndexByte("!#$%&'*+-.^_`|~", c) >= 0:
+		default:
+			return false
+		}
+	}
+	return true
+}
 
 func (l *JWTLogin) validate(j *JWTSource) error {
 	if j.OIDCDiscoveryURL == "" {
@@ -597,9 +621,11 @@ func (l *JWTLogin) validate(j *JWTSource) error {
 		return fmt.Errorf("login.refresh_max_age must not be negative")
 	}
 
-	// A cookie value may not contain these, and the name is used as-is.
-	if strings.ContainsAny(l.CookieName, " \t;,=\"\\") {
-		return fmt.Errorf("login.cookie_name %q is not a valid cookie name", l.CookieName)
+	if !validCookieName(l.CookieName) {
+		return fmt.Errorf("login.cookie_name %q is not a valid cookie name (RFC 6265 token characters only)", l.CookieName)
+	}
+	if strings.HasPrefix(l.CookieName, "tap_login_") {
+		return fmt.Errorf("login.cookie_name %q must not start with %q, which the proxy uses for its own cookies", l.CookieName, "tap_login_")
 	}
 	return nil
 }

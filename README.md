@@ -253,7 +253,7 @@ inbound:
 | `sp_base_url` | required | The proxy's own origin as the browser sees it |
 | `callback_path` | `/oidc/callback` | Register `sp_base_url + callback_path` as the redirect URI |
 | `scopes` | `openid profile email` | Requested scopes; must include `openid` |
-| `cookie_name` | `tap_id_token` | The ID token cookie |
+| `cookie_name` | `tap_id_token` | The ID token cookie; letters, digits and `!#$%&'*+-.^_`|~` only, and not starting with `tap_login_` |
 | `label` | the source name | Button text on the login picker |
 | `refresh` | `false` | Renew the session with a refresh token (see below) |
 | `refresh_max_age` | `720h` | Lifetime of the refresh cookie; only with `refresh` |

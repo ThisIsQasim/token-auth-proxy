@@ -28,6 +28,7 @@ type loginEnv struct {
 	server  *httptest.Server
 	backend atomic.Int64
 	source  *fakeSource
+	login   *LoginRegistry
 }
 
 type loginOpts struct {
@@ -84,9 +85,11 @@ func newLoginEnv(t *testing.T, o loginOpts) *loginEnv {
 			names = append(names, c.Name)
 		}
 		w.Header().Set("X-Seen-Cookies", strings.Join(names, ","))
+		w.Header().Set("X-Seen-Cookie-Header", strings.Join(r.Header.Values("Cookie"), " | "))
 		_, _ = io.WriteString(w, "backend:"+r.URL.RequestURI())
 	})
-	handler = NewMiddleware(e.source, reg, saml, NewBasicRegistry(testLogger()), NewLoginRegistry(reg, testLogger()), testLogger())(backend)
+	e.login = NewLoginRegistry(reg, testLogger())
+	handler = NewMiddleware(e.source, reg, saml, NewBasicRegistry(testLogger()), e.login, testLogger())(backend)
 	return e
 }
 
@@ -200,7 +203,7 @@ func TestLogin_RedirectsToIdPWithPKCEAndNonce(t *testing.T) {
 
 	var state *http.Cookie
 	for _, ck := range resp.Cookies() {
-		if ck.Name == loginStateCookie {
+		if strings.HasPrefix(ck.Name, loginStateCookie) {
 			state = ck
 		}
 	}
@@ -423,9 +426,9 @@ func TestPicker_UnknownRoutes(t *testing.T) {
 	}
 }
 
-func basicHeader(u, p string) string {
+func basicHeader(_, p string) string {
 	r := &http.Request{Header: http.Header{}}
-	r.SetBasicAuth(u, p)
+	r.SetBasicAuth("alice", p)
 	return r.Header.Get("Authorization")
 }
 
@@ -484,12 +487,7 @@ func TestRefresh_OffStoresNoRefreshCookie(t *testing.T) {
 
 func TestRefresh_RenewsExpiredSessionTransparently(t *testing.T) {
 	e := newLoginEnv(t, loginOpts{refresh: true, rotate: true})
-	c := e.client(t, false)
-	resp, _ := e.get(t, c, "/", nil)
-	require.Equal(t, http.StatusFound, resp.StatusCode)
-	// Complete the login by following redirects with a following client
-	// that shares the jar.
-	follow := &http.Client{Jar: c.Jar, Timeout: 10 * time.Second}
+	follow := e.client(t, true)
 	e.get(t, follow, "/", nil)
 	before := e.idp.RefreshCalls()
 	e.expireSession(t, follow)
@@ -596,4 +594,74 @@ func TestRefresh_ValidSessionDoesNotRefresh(t *testing.T) {
 		assert.Equal(t, http.StatusOK, resp.StatusCode)
 	}
 	assert.Zero(t, e.idp.RefreshCalls())
+}
+
+func TestLogin_ConcurrentLoginsInOneBrowser(t *testing.T) {
+	e := newLoginEnv(t, loginOpts{})
+	c := e.client(t, false)
+
+	// Two tabs start a login before either finishes.
+	var callbacks []string
+	for _, p := range []string{"/tab-a", "/tab-b"} {
+		resp, _ := e.get(t, c, p, nil)
+		require.Equal(t, http.StatusFound, resp.StatusCode)
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, resp.Header.Get("Location"), nil)
+		require.NoError(t, err)
+		idpResp, err := (&http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}).Do(req)
+		require.NoError(t, err)
+		_ = idpResp.Body.Close()
+		callbacks = append(callbacks, strings.TrimPrefix(idpResp.Header.Get("Location"), e.server.URL))
+	}
+
+	for i, want := range []string{"/tab-a", "/tab-b"} {
+		resp, _ := e.get(t, c, callbacks[i], nil)
+		require.Equal(t, http.StatusFound, resp.StatusCode, "tab %d must not be clobbered by the other", i)
+		assert.Equal(t, want, resp.Header.Get("Location"))
+	}
+}
+
+func TestRefresh_CookieStrippedOnEveryPath(t *testing.T) {
+	e := newLoginEnv(t, loginOpts{refresh: true, basic: true})
+	c := e.client(t, false)
+
+	// A Basic-authenticated request must not carry the refresh token to
+	// the backend, and the backend's own cookies must arrive untouched.
+	resp, _ := e.get(t, c, "/", map[string]string{
+		"Authorization": basicHeader("alice", "hunter2"),
+		"Cookie":        `a="x y"; tap_id_token_refresh=secret-rt; b=2`,
+	})
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, `a="x y"; b=2`, resp.Header.Get("X-Seen-Cookie-Header"))
+}
+
+func TestPicker_BasicChoiceOffersWayBack(t *testing.T) {
+	e := newLoginEnv(t, loginOpts{basic: true})
+	c := e.client(t, false)
+	resp, _ := e.get(t, c, "/_tap/login/basic?return_to=%2Fafter", map[string]string{"Authorization": basicHeader("alice", "hunter2")})
+	require.Equal(t, http.StatusFound, resp.StatusCode)
+
+	resp, body := e.get(t, c, "/page", nil)
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	assert.Contains(t, resp.Header.Get("Www-Authenticate"), "Basic realm")
+	assert.Contains(t, body, `href="/_tap/login?return_to=%2Fpage"`, "canceling the password prompt must leave a way to pick another method")
+
+	// The picker is still reachable and lets the user switch.
+	resp, body = e.get(t, c, "/_tap/login?return_to=%2Fpage", nil)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Contains(t, body, "Sign in with idp")
+}
+
+func TestLogin_DiscoveryOutageServesStaleEndpoints(t *testing.T) {
+	e := newLoginEnv(t, loginOpts{})
+	c := e.client(t, false)
+	resp, _ := e.get(t, c, "/", nil)
+	require.Equal(t, http.StatusFound, resp.StatusCode)
+
+	// The cached discovery result expires while the IdP is down: logins
+	// keep using the endpoints already known instead of failing.
+	e.login.now = func() time.Time { return time.Now().Add(2 * time.Hour) }
+	e.idp.Server.Close()
+	resp, _ = e.get(t, c, "/", nil)
+	require.Equal(t, http.StatusFound, resp.StatusCode)
+	assert.True(t, strings.HasPrefix(resp.Header.Get("Location"), e.idp.AuthorizeURL()))
 }

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"golang.org/x/oauth2"
@@ -46,15 +47,7 @@ var errRefreshRejected = errors.New("refresh token rejected")
 // setSession stores the ID token cookie and, when refresh is on and the
 // IdP issued one, the refresh token cookie.
 func (l *LoginRegistry) setSession(w http.ResponseWriter, r *http.Request, src config.JWTSource, idToken string, maxAge int, refreshToken string) {
-	http.SetCookie(w, &http.Cookie{ //nolint:gosec // see Start
-		Name:     src.Login.CookieName,
-		Value:    idToken,
-		Path:     "/",
-		MaxAge:   maxAge,
-		HttpOnly: true,
-		Secure:   loginSecure(src),
-		SameSite: http.SameSiteLaxMode,
-	})
+	http.SetCookie(w, loginCookie(src, src.Login.CookieName, idToken, maxAge))
 	if !src.Login.Refresh {
 		return
 	}
@@ -66,54 +59,83 @@ func (l *LoginRegistry) setSession(w http.ResponseWriter, r *http.Request, src c
 		l.logger.WarnContext(r.Context(), "refresh token too large for a cookie, not stored", "source", src.Name, "bytes", len(refreshToken))
 		return
 	}
-	http.SetCookie(w, &http.Cookie{ //nolint:gosec // see Start
-		Name:     src.Login.RefreshCookieName(),
-		Value:    refreshToken,
-		Path:     "/",
-		MaxAge:   int(src.Login.RefreshMaxAge.Seconds()),
-		HttpOnly: true,
-		Secure:   loginSecure(src),
-		SameSite: http.SameSiteLaxMode,
-	})
+	http.SetCookie(w, loginCookie(src, src.Login.RefreshCookieName(), refreshToken, int(src.Login.RefreshMaxAge.Seconds())))
 }
 
-func clearCookie(w http.ResponseWriter, src config.JWTSource, name string) {
-	http.SetCookie(w, &http.Cookie{ //nolint:gosec // see Start
-		Name: name, Path: "/", MaxAge: -1, HttpOnly: true, Secure: loginSecure(src), SameSite: http.SameSiteLaxMode,
-	})
+// TakeRefreshCookies removes every refresh cookie from r and returns
+// their values by source name. It runs before any leg of the middleware
+// decides, so a refresh token never reaches the backend whichever way
+// the request is authenticated; Refresh is handed what was taken.
+func TakeRefreshCookies(r *http.Request, auth config.InboundAuthConfig) map[string]string {
+	var names map[string]string // cookie name -> source name
+	for i := range auth.JWT {
+		if j := &auth.JWT[i]; j.LoginEnabled() && j.Login.Refresh {
+			if names == nil {
+				names = map[string]string{}
+			}
+			names[j.Login.RefreshCookieName()] = j.Name
+		}
+	}
+	if names == nil || r.Header.Get("Cookie") == "" {
+		return nil
+	}
+
+	var taken map[string]string
+	var kept []string
+	changed := false
+	// Filter the raw header rather than rebuilding it from r.Cookies(),
+	// which would re-encode (or drop) the backend's own cookies.
+	for _, line := range r.Header.Values("Cookie") {
+		var lineKept []string
+		for _, part := range strings.Split(line, ";") {
+			name, value, _ := strings.Cut(strings.TrimSpace(part), "=")
+			if src, ok := names[name]; ok {
+				if taken == nil {
+					taken = map[string]string{}
+				}
+				taken[src] = strings.Trim(value, `"`)
+				changed = true
+				continue
+			}
+			lineKept = append(lineKept, strings.TrimSpace(part))
+		}
+		if len(lineKept) > 0 {
+			kept = append(kept, strings.Join(lineKept, "; "))
+		}
+	}
+	if changed {
+		r.Header.Del("Cookie")
+		for _, k := range kept {
+			r.Header.Add("Cookie", k)
+		}
+	}
+	return taken
 }
 
-// Refresh renews the session of a request that carries a refresh cookie
-// but no credential at all (the ID token cookie has expired and been
-// dropped by the browser). On success the new cookies are set on the
-// response and the new ID token is added to r, so the request goes on
-// through the ordinary JWT leg as if it had never expired. The refresh
-// cookies are always removed from r so they never reach the backend.
+// Refresh renews the session of a request that carries a refresh token
+// (as returned by TakeRefreshCookies) but no credential at all: the ID
+// token cookie has expired and been dropped by the browser. On success
+// the new cookies are set on the response and the new ID token is added
+// to r, so the request goes on through the ordinary JWT leg as if it had
+// never expired.
 //
 // It reports whether it wrote a response (the IdP was unreachable), in
 // which case the caller must stop.
-func (l *LoginRegistry) Refresh(w http.ResponseWriter, r *http.Request, cfg *config.Config) (responded bool) {
-	var srcs []config.JWTSource
-	for _, s := range cfg.Inbound.Auth.LoginSources() {
-		if s.Login.Refresh {
-			srcs = append(srcs, s)
-		}
-	}
-	if len(srcs) == 0 {
+func (l *LoginRegistry) Refresh(w http.ResponseWriter, r *http.Request, cfg *config.Config, tokens map[string]string) (responded bool) {
+	if len(tokens) == 0 {
 		return false
 	}
-	defer stripRefreshCookies(r, srcs)
-
 	if _, ok := extractToken(r, cfg.Inbound.Auth); ok {
 		return false
 	}
 
-	for _, src := range srcs {
-		c, err := r.Cookie(src.Login.RefreshCookieName())
-		if err != nil || c.Value == "" {
+	for i := range cfg.Inbound.Auth.JWT {
+		src := cfg.Inbound.Auth.JWT[i]
+		rt := tokens[src.Name]
+		if rt == "" || !src.LoginEnabled() || !src.Login.Refresh {
 			continue
 		}
-		out, err := l.redeem(r.Context(), src, c.Value)
+		out, err := l.redeem(r.Context(), src, rt)
 		switch {
 		case err == nil:
 			l.setSession(w, r, src, out.idToken, out.maxAge, out.refreshToken)
@@ -121,37 +143,13 @@ func (l *LoginRegistry) Refresh(w http.ResponseWriter, r *http.Request, cfg *con
 			return false
 		case errors.Is(err, errRefreshRejected):
 			l.logger.InfoContext(r.Context(), "refresh token rejected, falling back to login", "source", src.Name, "err", err)
-			clearCookie(w, src, src.Login.RefreshCookieName())
+			http.SetCookie(w, loginCookie(src, src.Login.RefreshCookieName(), "", -1))
 		default:
 			rejectUnavailable(w, l.logger, r, reasonLoginUnavailable, err, loginRetry)
 			return true
 		}
 	}
 	return false
-}
-
-// stripRefreshCookies removes the refresh cookies from r's Cookie header.
-func stripRefreshCookies(r *http.Request, srcs []config.JWTSource) {
-	names := map[string]bool{}
-	for _, s := range srcs {
-		names[s.Login.RefreshCookieName()] = true
-	}
-	all := r.Cookies()
-	found := false
-	for _, c := range all {
-		if names[c.Name] {
-			found = true
-		}
-	}
-	if !found {
-		return
-	}
-	r.Header.Del("Cookie")
-	for _, c := range all {
-		if !names[c.Name] {
-			r.AddCookie(c)
-		}
-	}
 }
 
 // redeem exchanges refreshToken for a new ID token, sharing the result
@@ -162,13 +160,7 @@ func (l *LoginRegistry) redeem(ctx context.Context, src config.JWTSource, refres
 	key := hex.EncodeToString(sum[:])
 
 	l.refreshMu.Lock()
-	now := l.now()
-	for k, c := range l.refreshCalls {
-		if !c.finished.IsZero() && now.Sub(c.finished) > refreshGrace {
-			delete(l.refreshCalls, k)
-		}
-	}
-	if c, ok := l.refreshCalls[key]; ok {
+	if c, ok := l.refreshCalls[key]; ok && (c.finished.IsZero() || l.now().Sub(c.finished) <= refreshGrace) {
 		l.refreshMu.Unlock()
 		select {
 		case <-c.done:
@@ -192,6 +184,16 @@ func (l *LoginRegistry) redeem(ctx context.Context, src config.JWTSource, refres
 	if c.err != nil {
 		// Failures are not remembered: a retry may well succeed.
 		delete(l.refreshCalls, key)
+	} else {
+		// The entry holds live tokens, so it is dropped when the grace
+		// ends rather than whenever the next refresh happens to prune it.
+		time.AfterFunc(refreshGrace, func() {
+			l.refreshMu.Lock()
+			defer l.refreshMu.Unlock()
+			if l.refreshCalls[key] == c {
+				delete(l.refreshCalls, key)
+			}
+		})
 	}
 	l.refreshMu.Unlock()
 	close(c.done)
@@ -219,22 +221,13 @@ func (l *LoginRegistry) doRefresh(ctx context.Context, src config.JWTSource, ref
 		return refreshOutcome{}, fmt.Errorf("%w: token response has no id_token", errRefreshRejected)
 	}
 
-	kf, err := l.jwt.Keyfunc(ctx, src)
-	if err != nil {
+	// No nonce check: a refresh response carries none (OIDC Core 12.2).
+	_, maxAge, err := l.verifyIDToken(ctx, src, rawID)
+	if errors.Is(err, errKeysUnavailable) {
 		return refreshOutcome{}, err
 	}
-	// No nonce check: a refresh response carries none (OIDC Core 12.2).
-	claims, err := verify(rawID, src, kf)
 	if err != nil {
-		return refreshOutcome{}, fmt.Errorf("%w: id token: %s", errRefreshRejected, classify(err))
-	}
-	exp, err := claims.GetExpirationTime()
-	if err != nil || exp == nil {
-		return refreshOutcome{}, fmt.Errorf("%w: id token has no exp", errRefreshRejected)
-	}
-	maxAge := int(time.Until(exp.Time).Seconds())
-	if maxAge <= 0 || len(rawID) > maxCookieValueLen {
-		return refreshOutcome{}, fmt.Errorf("%w: unusable id token", errRefreshRejected)
+		return refreshOutcome{}, fmt.Errorf("%w: %w", errRefreshRejected, err)
 	}
 
 	next := tok.RefreshToken

@@ -127,8 +127,15 @@ func servePicker(w http.ResponseWriter, methods []loginMethod, returnTo, css str
 	for i, m := range methods {
 		items[i] = pickerItem{Href: template.URL(m.href(returnTo)), Label: m.label} // #nosec G203 -- built from a fixed path and url.Values.Encode
 	}
+	servePickerPage(w, http.StatusOK, items, css)
+}
+
+// servePickerPage renders the page for items with the given status; the
+// caller sets any other headers first.
+func servePickerPage(w http.ResponseWriter, status int, items []pickerItem, css string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
 	_ = pickerTmpl.Execute(w, struct {
 		Items []pickerItem
 		CSS   template.CSS
@@ -257,4 +264,17 @@ func loginPageCSS(auth config.InboundAuthConfig) string {
 		return ""
 	}
 	return auth.LoginPage.CSS
+}
+
+// serveBasicChallengePage answers a browser that chose Basic with the
+// challenge, plus a page offering a way back to the picker: without it,
+// canceling the browser's password prompt would leave a bare 401 and no
+// way to pick SAML or OIDC instead.
+func serveBasicChallengePage(w http.ResponseWriter, r *http.Request, auth config.InboundAuthConfig, logger *slog.Logger) {
+	w.Header().Add("WWW-Authenticate", basicChallenge(auth.Basic.Realm))
+	q := url.Values{"return_to": {r.URL.RequestURI()}}
+	servePickerPage(w, http.StatusUnauthorized, []pickerItem{{Href: template.URL(config.LoginPathPrefix + "?" + q.Encode()), Label: "Choose another way to sign in"}}, loginPageCSS(auth)) // #nosec G203 -- fixed path plus url.Values.Encode
+
+	logger.InfoContext(r.Context(), "rejected request", "reason", string(reasonNoCredential), "path", r.URL.Path)
+	recordRejection(r.Context(), reasonNoCredential)
 }

@@ -207,9 +207,9 @@ func NewMiddleware(source ConfigSource, jwtReg *Registry, samlReg *SAMLRegistry,
 			// Step 1b: OIDC login callbacks and the proxy's own login
 			// routes. Like the ACS path, neither can sit behind a credential
 			// check: the browser arrives with none.
-			for _, src := range cfg.Inbound.Auth.LoginSources() {
-				if r.URL.Path == src.Login.CallbackPath {
-					loginReg.Callback(w, r, src)
+			for i := range cfg.Inbound.Auth.JWT {
+				if src := &cfg.Inbound.Auth.JWT[i]; src.LoginEnabled() && r.URL.Path == src.Login.CallbackPath {
+					loginReg.Callback(w, r, *src)
 					return
 				}
 			}
@@ -217,6 +217,10 @@ func NewMiddleware(source ConfigSource, jwtReg *Registry, samlReg *SAMLRegistry,
 				serveLoginRoute(w, r, cfg, deps, logger)
 				return
 			}
+
+			// Refresh cookies are taken off the request before any leg decides,
+			// so none of them can forward one to the backend.
+			refreshTokens := TakeRefreshCookies(r, cfg.Inbound.Auth)
 
 			// Step 2.
 			if basicEnabled {
@@ -240,7 +244,7 @@ func NewMiddleware(source ConfigSource, jwtReg *Registry, samlReg *SAMLRegistry,
 
 			// Step 3.
 			if jwtEnabled {
-				if loginReg.Refresh(w, r, cfg) {
+				if loginReg.Refresh(w, r, cfg, refreshTokens) {
 					return
 				}
 				outcome, p := enforceJWT(w, r, cfg, jwtReg, logger)
@@ -274,7 +278,7 @@ func NewMiddleware(source ConfigSource, jwtReg *Registry, samlReg *SAMLRegistry,
 				}
 				switch m.kind {
 				case "basic":
-					rejectChallenges(w, logger, r, reasonNoCredential, []string{basicChallenge(basicSrc.Realm)})
+					serveBasicChallengePage(w, r, cfg.Inbound.Auth, logger)
 					return
 				case "jwt":
 					src := jwtLoginSource(cfg.Inbound.Auth, m.source)

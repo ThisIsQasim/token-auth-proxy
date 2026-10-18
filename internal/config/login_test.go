@@ -166,3 +166,23 @@ func TestInboundAuth_RefreshCookieCollision(t *testing.T) {
 	cfg := InboundAuthConfig{JWT: []JWTSource{a, b}}
 	assert.ErrorContains(t, cfg.Validate(), "already used by another source")
 }
+
+func TestJWTLogin_CookieNameValidation(t *testing.T) {
+	for name, ok := range map[string]bool{
+		"tap_id_token": true, "my-session.v2": true, "A1!#$%&'*+^`|~": true,
+		"my/session": false, "a(b)": false, "a@b": false, "a b": false, "é": false, "": true, // empty defaults
+		"tap_login_state": false, "tap_login_method": false,
+	} {
+		j := validLoginSource()
+		j.Login.CookieName = name
+		if name == "" {
+			j.Login.CookieName = "tap_id_token"
+		}
+		err := j.validate()
+		if ok {
+			assert.NoError(t, err, name)
+		} else {
+			assert.Error(t, err, name)
+		}
+	}
+}
