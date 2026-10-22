@@ -105,16 +105,12 @@ func validateIDPMetadataShape(entity *saml.EntityDescriptor) error {
 	return nil
 }
 
-// idpSigningCertExpiry returns the earliest NotAfter among the signing
-// certificates entity publishes that haven't expired yet, or among all of
-// them if every one already has. The zero time means no certificate could
+// idpSigningCertExpiryAt returns the earliest NotAfter among the signing
+// certificates entity publishes that haven't expired as of now, or among
+// all of them if every one already has. The zero time means no certificate could
 // be parsed, which leaves the cache lifetime to the TTL alone. During a
 // rollover the earliest still-valid expiry is the first moment the
 // published set changes, so that is when a refetch is due.
-func idpSigningCertExpiry(entity *saml.EntityDescriptor) time.Time {
-	return idpSigningCertExpiryAt(entity, time.Now())
-}
-
 func idpSigningCertExpiryAt(entity *saml.EntityDescriptor, now time.Time) time.Time {
 	var validEarliest, anyEarliest time.Time
 	for _, idp := range entity.IDPSSODescriptors {

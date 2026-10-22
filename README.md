@@ -185,7 +185,7 @@ over; see below for how the two combine.
   this source rather than adding to it, so pinning the wrong bundle
   fails the fetch instead of quietly falling back to public trust. It
   covers key material only — the backend and the SAML IdP metadata
-  fetch are unaffected. Write `ca_cert: "${file:/path/to/ca.crt}"`
+  fetch are unaffected (a SAML source has its own `ca_cert`). Write `ca_cert: "${file:/path/to/ca.crt}"`
   ([value references](#value-references-env--file)) to load it from a
   mounted file; a rotated CA takes effect on the next reload. Setting it
   on an `http://` endpoint is a config error, since it would never be
@@ -453,6 +453,15 @@ limitation below for exactly who that does and doesn't unblock.
   the last-known-good metadata rather than logging every active session
   out, but the *first* fetch (nothing cached yet) fails closed — there's
   no sensible degraded behavior without at least one working fetch.
+- **`ca_cert`** (optional): a PEM CA bundle (or that same PEM,
+  base64-encoded) used to verify the TLS certificate of
+  `idp_metadata_url`, for an IdP behind a private CA. Like the JWT
+  source's, it **replaces** the system trust store for that fetch rather
+  than adding to it, and it covers the metadata fetch only: the
+  browser talks to the IdP's SSO endpoint directly. Write
+  `ca_cert: "${file:/path/to/ca.crt}"` to load it from a mounted file.
+  An invalid bundle, or one set on an `http://` metadata URL, fails the
+  config load.
 - **`sp_base_url`** (required): this proxy's own externally-reachable
   origin, e.g. `https://proxy.example.com` — used to build the ACS URL
   advertised to the IdP. **Must be `https://` in any real deployment**:

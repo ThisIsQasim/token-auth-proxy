@@ -765,6 +765,14 @@ type SAMLSource struct {
 	SessionSigningKeyEnv string        `yaml:"session_signing_key_env,omitempty"` // required — NAME of an env var holding the signing key, never the key itself in YAML
 	SessionDuration      time.Duration `yaml:"session_duration,omitempty"`        // defaults to defaultSessionDuration
 
+	// CACert is an optional PEM-encoded (or that same PEM, base64-encoded
+	// — see ParseCACertPool) CA bundle used to verify the TLS certificate
+	// of idp_metadata_url. Empty means the system trust store. It replaces
+	// the system trust store for that fetch rather than extending it, and
+	// affects nothing else: the browser talks to the IdP's SSO endpoint
+	// directly, and the backend leg is a separate trust decision.
+	CACert string `yaml:"ca_cert,omitempty"`
+
 	// SPKeyEnv/SPCert are optional and must be set together, or not at
 	// all: an RSA keypair this proxy persists and advertises in its own
 	// (samlsp-generated) SP metadata, enabling the IdP to encrypt
@@ -807,6 +815,14 @@ func (s *SAMLSource) validate() error {
 	}
 	if _, err := parseAbsoluteHTTPURL("idp_metadata_url", s.IDPMetadataURL); err != nil {
 		return err
+	}
+	if s.CACert != "" {
+		if _, err := ParseCACertPool(s.CACert); err != nil {
+			return fmt.Errorf("ca_cert: %w", err)
+		}
+		if strings.HasPrefix(strings.ToLower(s.IDPMetadataURL), "http://") {
+			return fmt.Errorf("ca_cert is set but idp_metadata_url is http://, so it would never be used; use https:// or remove ca_cert")
+		}
 	}
 	if s.SPBaseURL == "" {
 		return fmt.Errorf("sp_base_url is required")

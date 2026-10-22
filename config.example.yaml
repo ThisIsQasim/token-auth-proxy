@@ -94,7 +94,7 @@ timeouts:
 #         # the system trust store for those endpoints (so pinning the
 #         # wrong bundle fails the fetch rather than falling back to
 #         # public trust), and affects nothing else — not the backend,
-#         # not SAML IdP metadata. Inline PEM works too; a ${file:...}
+#         # not SAML IdP metadata (a saml source has its own ca_cert). Inline PEM works too; a ${file:...}
 #         # reference is just the usual way to point at a mounted one.
 #         ca_cert: "${file:/var/run/secrets/kubernetes.io/serviceaccount/ca.crt}"
 #
@@ -193,6 +193,10 @@ timeouts:
 #       session_signing_key_env: "CORP_SSO_SESSION_KEY"
 #       session_duration: 8h
 #       idp_metadata_cache_ttl: 1h # optional, defaults shown
+#       # Optional. PEM CA bundle used to verify the TLS certificate of
+#       # idp_metadata_url, for an IdP behind a private CA. Replaces the
+#       # system trust store for that fetch only.
+#       # ca_cert: "${file:/etc/idp-ca/ca.crt}"
 #       #
 #       # Optional, and must be set together (or not at all): a
 #       # persistent RSA keypair this proxy advertises as an encryption

@@ -142,6 +142,7 @@ func samlFingerprint(s config.SAMLSource) string {
 		s.SessionDuration.String(),
 		s.SPKeyEnv,
 		s.SPCert,
+		s.CACert,
 	}, "\x00")
 }
 
@@ -269,7 +270,20 @@ func (r *SAMLRegistry) fetchAndBuild(src config.SAMLSource) (*samlsp.Middleware,
 	fetchCtx, cancel := context.WithTimeout(r.ctx, samlHTTPTimeout)
 	defer cancel()
 
-	entity, err := fetchIDPMetadata(fetchCtx, r.client, src.IDPMetadataURL, src.Issuer)
+	client := r.client
+	if src.CACert != "" {
+		// A per-source client: the trust roots are part of the source's config,
+		// and a fetch happens at most once per TTL, so there is no pool worth
+		// keeping between them.
+		c, err := newTrustClient(src.CACert, samlHTTPTimeout)
+		if err != nil {
+			return nil, time.Time{}, fmt.Errorf("build ca_cert trust roots: %w", err)
+		}
+		defer c.CloseIdleConnections()
+		client = c
+	}
+
+	entity, err := fetchIDPMetadata(fetchCtx, client, src.IDPMetadataURL, src.Issuer)
 	if err != nil {
 		return nil, time.Time{}, fmt.Errorf("fetch idp metadata: %w", err)
 	}
@@ -292,7 +306,7 @@ func (r *SAMLRegistry) fetchAndBuild(src config.SAMLSource) (*samlsp.Middleware,
 			"sp_base_url", src.SPBaseURL)
 	}
 
-	return provider, idpSigningCertExpiry(entity), nil
+	return provider, idpSigningCertExpiryAt(entity, r.now()), nil
 }
 
 // buildSAMLProvider is the production newSAMLProviderFunc.

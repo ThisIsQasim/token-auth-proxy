@@ -72,6 +72,10 @@ inbound:
       idp_metadata_cache_ttl: 1h  # optional, default shown
 ```
 
+If the IdP's metadata URL is served with a certificate from a private CA,
+add `ca_cert` (PEM, or `${file:/path/to/ca.crt}` to load a mounted file).
+It replaces the system trust store for the metadata fetch only.
+
 `issuer` must exactly match the `entityID` your IdP's own metadata
 advertises — the proxy cross-checks this the same way the JWT leg
 checks a token's `iss`.

@@ -176,6 +176,13 @@ func fingerprint(j config.JWTSource) string {
 // pooling limits and HTTP/2 negotiation stay identical to every other
 // client here — the trust roots are the only intended difference.
 func newCACertClient(caCertPEM string) (*http.Client, error) {
+	return newTrustClient(caCertPEM, jwksHTTPTimeout)
+}
+
+// newTrustClient is newCACertClient with the request timeout chosen by
+// the caller, for the other fetch that pins a CA bundle (SAML IdP
+// metadata).
+func newTrustClient(caCertPEM string, timeout time.Duration) (*http.Client, error) {
 	pool, err := config.ParseCACertPool(caCertPEM)
 	if err != nil {
 		return nil, err
@@ -188,7 +195,7 @@ func newCACertClient(caCertPEM string) (*http.Client, error) {
 	transport := base.Clone()
 	transport.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
 
-	return &http.Client{Timeout: jwksHTTPTimeout, Transport: transport}, nil
+	return &http.Client{Timeout: timeout, Transport: transport}, nil
 }
 
 // Reconcile brings the resolver set in line with cfg. In the steady

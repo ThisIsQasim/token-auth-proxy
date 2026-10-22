@@ -255,6 +255,10 @@ func TestJWTSource_Validate(t *testing.T) {
 }
 
 func TestSAMLSource_Validate(t *testing.T) {
+	priv, err := testSPRSAKey()
+	require.NoError(t, err)
+	testCAPEM := testSPCertPEM(t, priv)
+
 	tests := []struct {
 		name      string
 		mutate    func(*SAMLSource)
@@ -290,6 +294,21 @@ func TestSAMLSource_Validate(t *testing.T) {
 		{
 			name: "acs_path is /healthz", mutate: func(s *SAMLSource) { s.ACSPath = "/healthz" },
 			wantErr: true, errSubstr: "/healthz",
+		},
+		{
+			name: "ca_cert that is not a certificate", mutate: func(s *SAMLSource) { s.CACert = "not a certificate" },
+			wantErr: true, errSubstr: "ca_cert",
+		},
+		{
+			name: "ca_cert on an http idp_metadata_url",
+			mutate: func(s *SAMLSource) {
+				s.IDPMetadataURL = "http://idp.example.com/metadata"
+				s.CACert = testCAPEM
+			},
+			wantErr: true, errSubstr: "would never be used",
+		},
+		{
+			name: "ca_cert on an https idp_metadata_url", mutate: func(s *SAMLSource) { s.CACert = testCAPEM },
 		},
 		{
 			name: "missing session_cookie", mutate: func(s *SAMLSource) { s.SessionCookie = "" },
