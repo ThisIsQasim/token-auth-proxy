@@ -26,6 +26,7 @@ type discoveryDoc struct {
 	JWKSURI               string `json:"jwks_uri"`
 	AuthorizationEndpoint string `json:"authorization_endpoint"` // read only for browser login
 	TokenEndpoint         string `json:"token_endpoint"`         // read only for browser login
+	EndSessionEndpoint    string `json:"end_session_endpoint"`   // read only for logout
 }
 
 // fetchJWKSURI fetches the OIDC discovery document at discoveryURL

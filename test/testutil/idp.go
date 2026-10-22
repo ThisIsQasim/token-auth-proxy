@@ -134,6 +134,7 @@ type TestIDP struct {
 
 	jwksHits      atomic.Int64
 	discoveryHits atomic.Int64
+	endSession    atomic.Pointer[string]
 
 	oidcOnce sync.Once
 	oidcSt   *oidcState
@@ -196,8 +197,19 @@ func (i *TestIDP) serveDiscovery(w http.ResponseWriter, _ *http.Request) {
 		"authorization_endpoint": i.Server.URL + "/authorize",
 		"token_endpoint":         i.Server.URL + "/token",
 	}
+	if end := i.endSession.Load(); end != nil {
+		doc["end_session_endpoint"] = *end
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(doc)
+}
+
+// EnableEndSession makes the discovery document advertise an
+// end_session_endpoint and returns its URL.
+func (i *TestIDP) EnableEndSession() string {
+	end := i.Server.URL + "/logout"
+	i.endSession.Store(&end)
+	return end
 }
 
 // setKeypair builds a fresh JWKS document from kp and installs it as

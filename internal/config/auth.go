@@ -483,6 +483,19 @@ type JWTLogin struct {
 	// which case the user is sent through a full login. Only valid with
 	// Refresh.
 	RefreshMaxAge time.Duration `yaml:"refresh_max_age,omitempty"`
+
+	// EndSession makes /_tap/logout also end the session at the identity
+	// provider: after clearing the cookies it redirects to the discovery
+	// document's end_session_endpoint with the ID token as id_token_hint.
+	// Without it, signing out only forgets the session here, and a provider
+	// session that is still alive signs the user straight back in. Ignored
+	// (logout stays local) if the provider advertises no end_session_endpoint.
+	EndSession bool `yaml:"end_session,omitempty"`
+
+	// PostLogoutRedirectURI is where the provider sends the browser after
+	// ending its session. It has to be registered with the provider.
+	// Only valid with EndSession.
+	PostLogoutRedirectURI string `yaml:"post_logout_redirect_uri,omitempty"`
 }
 
 const (
@@ -500,6 +513,11 @@ const (
 	// and its per-method entry points. It is handled by the proxy itself
 	// and never reaches the backend.
 	LoginPathPrefix = "/_tap/login"
+
+	// LogoutPath ends the browser sessions this proxy holds: it clears the
+	// SAML session cookie and every login cookie. Handled by the proxy itself
+	// and never reaches the backend.
+	LogoutPath = "/_tap/logout"
 
 	// TokenAuthBasic sends the client secret in the Authorization header.
 	TokenAuthBasic = "client_secret_basic"
@@ -603,7 +621,7 @@ func (l *JWTLogin) validate(j *JWTSource) error {
 		return fmt.Errorf("login.callback_path must begin with %q", "/")
 	}
 	if l.CallbackPath == "/healthz" || l.CallbackPath == "/metrics" ||
-		l.CallbackPath == LoginPathPrefix || strings.HasPrefix(l.CallbackPath, LoginPathPrefix+"/") {
+		l.CallbackPath == LoginPathPrefix || strings.HasPrefix(l.CallbackPath, LoginPathPrefix+"/") || l.CallbackPath == LogoutPath {
 		return fmt.Errorf("login.callback_path must not be %q: that path is served by the proxy itself", l.CallbackPath)
 	}
 	if !slices.Contains(l.Scopes, "openid") {
@@ -617,6 +635,15 @@ func (l *JWTLogin) validate(j *JWTSource) error {
 	} else {
 		if l.TokenAuthMethod != TokenAuthBasic && l.TokenAuthMethod != TokenAuthPost {
 			return fmt.Errorf("login.token_auth_method %q must be %s or %s", l.TokenAuthMethod, TokenAuthBasic, TokenAuthPost)
+		}
+	}
+
+	if !l.EndSession && l.PostLogoutRedirectURI != "" {
+		return fmt.Errorf("login.post_logout_redirect_uri only applies with login.end_session")
+	}
+	if l.PostLogoutRedirectURI != "" {
+		if _, err := parseAbsoluteHTTPURL("login.post_logout_redirect_uri", l.PostLogoutRedirectURI); err != nil {
+			return err
 		}
 	}
 
@@ -839,7 +866,7 @@ func (s *SAMLSource) validate() error {
 	if !strings.HasPrefix(s.ACSPath, "/") {
 		return fmt.Errorf("acs_path must begin with %q", "/")
 	}
-	if s.ACSPath == LoginPathPrefix || strings.HasPrefix(s.ACSPath, LoginPathPrefix+"/") {
+	if s.ACSPath == LoginPathPrefix || strings.HasPrefix(s.ACSPath, LoginPathPrefix+"/") || s.ACSPath == LogoutPath {
 		return fmt.Errorf("acs_path must not be %q: that path is served by the proxy itself", s.ACSPath)
 	}
 	if s.ACSPath == "/healthz" {

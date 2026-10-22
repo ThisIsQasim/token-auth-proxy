@@ -57,8 +57,11 @@ type loginState struct {
 type loginEndpoints struct {
 	authURL  string
 	tokenURL string
-	client   *http.Client
-	expires  time.Time
+	// endSessionURL is the provider's end_session_endpoint, empty when it
+	// advertises none or an unusable one.
+	endSessionURL string
+	client        *http.Client
+	expires       time.Time
 }
 
 // loginSlot is one source's discovery cache. Its own mutex is held across
@@ -179,7 +182,11 @@ func (l *LoginRegistry) fetchEndpoints(ctx context.Context, src config.JWTSource
 			return nil, fmt.Errorf("discovery document %s: %w", name, err)
 		}
 	}
-	return &loginEndpoints{authURL: doc.AuthorizationEndpoint, tokenURL: doc.TokenEndpoint, client: client, expires: l.now().Add(loginEndpointsTTL)}, nil
+	endSession := doc.EndSessionEndpoint
+	if validateAbsoluteHTTPURL(endSession) != nil {
+		endSession = ""
+	}
+	return &loginEndpoints{authURL: doc.AuthorizationEndpoint, tokenURL: doc.TokenEndpoint, endSessionURL: endSession, client: client, expires: l.now().Add(loginEndpointsTTL)}, nil
 }
 
 func (l *LoginRegistry) oauthConfig(src config.JWTSource, e *loginEndpoints) *oauth2.Config {
@@ -384,6 +391,9 @@ func sanitizeReturnTo(raw string) string {
 	}
 	u, err := url.Parse(raw)
 	if err != nil || u.Scheme != "" || u.Host != "" {
+		return "/"
+	}
+	if u.Path == config.LogoutPath {
 		return "/"
 	}
 	if u.Path == config.LoginPathPrefix || strings.HasPrefix(u.Path, config.LoginPathPrefix+"/") {

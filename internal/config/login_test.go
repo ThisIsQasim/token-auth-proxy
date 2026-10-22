@@ -54,6 +54,13 @@ func TestJWTLogin_Validate(t *testing.T) {
 		{"relative callback", func(j *JWTSource) { j.Login.CallbackPath = "cb" }, "callback_path"},
 		{"callback on login route", func(j *JWTSource) { j.Login.CallbackPath = "/_tap/login/x" }, "served by the proxy"},
 		{"callback on healthz", func(j *JWTSource) { j.Login.CallbackPath = "/healthz" }, "served by the proxy"},
+		{"callback on logout route", func(j *JWTSource) { j.Login.CallbackPath = "/_tap/logout" }, "served by the proxy"},
+		{"post_logout_redirect_uri without end_session", func(j *JWTSource) {
+			j.Login.PostLogoutRedirectURI = "https://proxy.example.com/"
+		}, "only applies with login.end_session"},
+		{"relative post_logout_redirect_uri", func(j *JWTSource) {
+			j.Login.EndSession, j.Login.PostLogoutRedirectURI = true, "/signed-out"
+		}, "post_logout_redirect_uri"},
 		{"no openid scope", func(j *JWTSource) { j.Login.Scopes = []string{"profile"} }, "openid"},
 		{"auth method without secret", func(j *JWTSource) { j.Login.TokenAuthMethod = TokenAuthPost }, "token_auth_method"},
 		{"bad auth method", func(j *JWTSource) {
@@ -203,4 +210,12 @@ func TestSAMLSource_ACSPathNotUnderLoginPrefix(t *testing.T) {
 		s.ACSPath = p
 		assert.ErrorContains(t, s.validate(), "served by the proxy itself", p)
 	}
+}
+
+func TestJWTLogin_EndSessionOptions(t *testing.T) {
+	j := validLoginSource()
+	j.Login.EndSession = true
+	require.NoError(t, j.validate(), "end_session alone is valid")
+	j.Login.PostLogoutRedirectURI = "https://proxy.example.com/_tap/login"
+	require.NoError(t, j.validate(), "and so is a post-logout redirect with it")
 }

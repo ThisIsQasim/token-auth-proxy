@@ -244,6 +244,10 @@ func NewMiddleware(source ConfigSource, jwtReg *Registry, samlReg *SAMLRegistry,
 				serveLoginRoute(w, r, cfg, deps, logger)
 				return
 			}
+			if loginMethodCount > 0 && isLogoutRoute(r.URL.Path) {
+				loginReg.serveLogout(w, r, cfg, logger)
+				return
+			}
 
 			// Refresh cookies are taken off the request before any leg decides,
 			// so none of them can forward one to the backend.

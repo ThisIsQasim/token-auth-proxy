@@ -124,6 +124,11 @@ timeouts:
 #           # scopes: [openid, profile, email, groups, offline_access]
 #           refresh: true
 #           refresh_max_age: 720h                            # default 720h; cookie is <cookie_name>_refresh
+#           # Make /_tap/logout also end the IdP session, via the discovery
+#           # document's end_session_endpoint. post_logout_redirect_uri (registered
+#           # with the IdP) brings the browser back afterwards.
+#           # end_session: true
+#           # post_logout_redirect_uri: "https://proxy.example.com/_tap/login"
 #         algorithms: ["RS256", "ES256"]
 #         # Credentials is a list, tried in order: header first, then a
 #         # cookie fallback for browser-originated requests.

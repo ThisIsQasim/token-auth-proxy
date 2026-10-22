@@ -32,6 +32,8 @@ type loginEnv struct {
 	backend atomic.Int64
 	source  *fakeSource
 	login   *LoginRegistry
+
+	endSessionURL string
 }
 
 type loginOpts struct {
@@ -41,6 +43,10 @@ type loginOpts struct {
 
 	refresh bool // login.refresh, with the IdP issuing refresh tokens
 	rotate  bool // the IdP rotates refresh tokens
+
+	endSession    bool   // login.end_session, with the IdP advertising an end_session_endpoint
+	noEndpoint    bool   // end_session set, but the IdP advertises none
+	postLogoutURI string // login.post_logout_redirect_uri
 }
 
 func newLoginEnv(t *testing.T, o loginOpts) *loginEnv {
@@ -60,6 +66,12 @@ func newLoginEnv(t *testing.T, o loginOpts) *loginEnv {
 	}
 	if o.secret != "" {
 		lg.ClientSecret, lg.TokenAuthMethod = o.secret, o.method
+	}
+	if o.endSession {
+		lg.EndSession, lg.PostLogoutRedirectURI = true, o.postLogoutURI
+		if !o.noEndpoint {
+			e.endSessionURL = e.idp.EnableEndSession()
+		}
 	}
 	src := config.JWTSource{
 		Name: "idp", Issuer: e.idp.Issuer, OIDCDiscoveryURL: e.idp.DiscoveryURL,

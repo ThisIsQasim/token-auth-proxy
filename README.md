@@ -262,6 +262,8 @@ inbound:
 | `label` | the source name | Button text on the login picker |
 | `refresh` | `false` | Renew the session with a refresh token (see below) |
 | `refresh_max_age` | `720h` | Lifetime of the refresh cookie; only with `refresh` |
+| `end_session` | `false` | Make `/_tap/logout` also end the session at the identity provider (see [Logging out](#logging-out)) |
+| `post_logout_redirect_uri` | none | Where the provider sends the browser afterwards; must be registered with it; only with `end_session` |
 
 - **Confidential or public.** With `client_secret` (write it as `${env:NAME}` or `${file:PATH}`,
   not inline) the proxy authenticates to the token
@@ -289,6 +291,7 @@ inbound:
   refresh is on, below); the token must also fit in a cookie (about 4KB).
   `audiences` defaults to the `client_id`; if you set it, it must contain
   the `client_id`.
+- **Logging out.** <a id="logging-out"></a>`/_tap/logout` (GET, HEAD or POST) clears the SAML session cookie, every login source's ID token and refresh cookies, and the remembered sign-in choice, then redirects to `return_to` (a same-origin path, default `/`, which lands on the sign-in page). It is served by the proxy and skips ACLs, like the other `/_tap/` routes, and is only available when SAML or a login source is configured. Clearing cookies forgets the session here only: if the identity provider's own session is still alive, signing in again is instant. Set `login.end_session: true` and the redirect goes to the provider's `end_session_endpoint` (from its discovery document) with the ID token as `id_token_hint`, ending that session too; add `post_logout_redirect_uri` to bring the browser back, after registering it with the provider. A provider that advertises no `end_session_endpoint` gets the local logout. Basic credentials are held by the browser itself, so no response can clear them, and SAML single logout is not supported.
 - **Refresh tokens.** Set `login.refresh: true` to keep a browser signed in
   past the ID token's expiry. The refresh token is stored in a second
   cookie (`<cookie_name>_refresh`, lasting `refresh_max_age`, default
