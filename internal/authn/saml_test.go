@@ -623,3 +623,49 @@ func TestValidateSAMLAudienceRestriction(t *testing.T) {
 		})
 	}
 }
+
+func TestSAMLRegistry_Provider_RefreshesWhenTheSigningCertExpiresBeforeTheTTL(t *testing.T) {
+	var mu sync.Mutex
+	var calls []samlProviderCall
+	r := newTestSAMLRegistry(t, newFakeSAMLProvider(&calls, &mu, nil))
+	idp := NewTestSAMLIDP(t) // its certificate expires in 24h
+
+	now := time.Now()
+	r.now = func() time.Time { return now }
+
+	src := testSAMLSource(idp)
+	src.IDPMetadataCacheTTL = 72 * time.Hour
+	cfg := &config.Config{Inbound: config.InboundConfig{Auth: config.InboundAuthConfig{SAML: &src}}}
+	r.Reconcile(cfg)
+
+	builds := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(calls)
+	}
+
+	_, err := r.Provider(src)
+	require.NoError(t, err)
+
+	now = now.Add(23 * time.Hour)
+	_, err = r.Provider(src)
+	require.NoError(t, err)
+	assert.Equal(t, 1, builds(), "before the certificate expires the ttl is not up, so no refetch")
+
+	now = now.Add(2 * time.Hour) // past the certificate's expiry, far inside the ttl
+	_, err = r.Provider(src)
+	require.NoError(t, err)
+	assert.Equal(t, 2, builds(), "an expired signing certificate must trigger a refetch before the ttl")
+
+	// The IdP still publishes the expired certificate: the refetch is
+	// rate-limited rather than repeated on every request.
+	now = now.Add(30 * time.Second)
+	_, err = r.Provider(src)
+	require.NoError(t, err)
+	assert.Equal(t, 2, builds(), "an expired certificate must not refetch on every request")
+
+	now = now.Add(2 * time.Minute)
+	_, err = r.Provider(src)
+	require.NoError(t, err)
+	assert.Equal(t, 3, builds(), "the refetch is retried once the minimum interval has passed")
+}

@@ -1,12 +1,15 @@
 package authn
 
 import (
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/xml"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/crewjam/saml"
 	"github.com/stretchr/testify/assert"
@@ -165,4 +168,67 @@ func TestFetchIDPMetadata_OversizeBodyCapped(t *testing.T) {
 
 	_, err := fetchIDPMetadata(t.Context(), http.DefaultClient, srv.URL, "https://idp.example.com/metadata")
 	require.Error(t, err, "a body larger than maxIDPMetadataBytes must not parse successfully")
+}
+
+func TestSAMLRefreshAt(t *testing.T) {
+	now := time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)
+	ttl := time.Hour
+
+	tests := []struct {
+		name   string
+		expiry time.Time
+		want   time.Time
+	}{
+		{"unknown expiry uses the ttl", time.Time{}, now.Add(ttl)},
+		{"expiry after the ttl uses the ttl", now.Add(2 * ttl), now.Add(ttl)},
+		{"expiry before the ttl wins", now.Add(20 * time.Minute), now.Add(20 * time.Minute)},
+		{"expiry sooner than the floor waits for the floor", now.Add(10 * time.Second), now.Add(samlMinMetadataRefresh)},
+		{"already expired waits for the floor", now.Add(-24 * time.Hour), now.Add(samlMinMetadataRefresh)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, samlRefreshAt(now, ttl, tt.expiry))
+		})
+	}
+
+	t.Run("a ttl shorter than the floor is never exceeded", func(t *testing.T) {
+		assert.Equal(t, now.Add(10*time.Second), samlRefreshAt(now, 10*time.Second, now.Add(-time.Hour)))
+	})
+}
+
+func TestIDPSigningCertExpiry(t *testing.T) {
+	now := time.Now()
+	_, cert := newSAMLIDPKeypair(t, true) // expires in 24h
+	entity := func(use string, certs ...*x509.Certificate) *saml.EntityDescriptor {
+		var kds []saml.KeyDescriptor
+		for _, c := range certs {
+			kds = append(kds, saml.KeyDescriptor{
+				Use: use,
+				KeyInfo: saml.KeyInfo{X509Data: saml.X509Data{
+					X509Certificates: []saml.X509Certificate{{Data: base64.StdEncoding.EncodeToString(c.Raw)}},
+				}},
+			})
+		}
+		return &saml.EntityDescriptor{IDPSSODescriptors: []saml.IDPSSODescriptor{{
+			SSODescriptor: saml.SSODescriptor{RoleDescriptor: saml.RoleDescriptor{KeyDescriptors: kds}},
+		}}}
+	}
+
+	t.Run("a signing cert gives its NotAfter", func(t *testing.T) {
+		assert.True(t, idpSigningCertExpiryAt(entity("signing", cert), now).Equal(cert.NotAfter))
+	})
+	t.Run("an empty use counts as signing", func(t *testing.T) {
+		assert.True(t, idpSigningCertExpiryAt(entity("", cert), now).Equal(cert.NotAfter))
+	})
+	t.Run("an encryption-only cert is ignored", func(t *testing.T) {
+		assert.True(t, idpSigningCertExpiryAt(entity("encryption", cert), now).IsZero())
+	})
+	t.Run("an expired cert is still reported when it is the only one", func(t *testing.T) {
+		assert.True(t, idpSigningCertExpiryAt(entity("signing", cert), now.Add(48*time.Hour)).Equal(cert.NotAfter))
+	})
+	t.Run("unparseable data gives the zero time", func(t *testing.T) {
+		e := entity("signing", cert)
+		e.IDPSSODescriptors[0].KeyDescriptors[0].KeyInfo.X509Data.X509Certificates[0].Data = "dummy-cert-data"
+		assert.True(t, idpSigningCertExpiryAt(e, now).IsZero())
+	})
 }

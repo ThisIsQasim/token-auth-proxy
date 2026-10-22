@@ -446,7 +446,10 @@ limitation below for exactly who that does and doesn't unblock.
   session redirects back to the IdP exactly like a fresh unauthenticated
   request — never a `401`.
 - **IdP metadata**: fetched from `idp_metadata_url` and cached for
-  `idp_metadata_cache_ttl` (default 1h); a refresh failure keeps serving
+  `idp_metadata_cache_ttl` (default 1h), or until the earliest signing
+  certificate in it expires if that comes sooner (never refetched more
+  than once a minute, so an IdP that still publishes an expired
+  certificate isn't hammered); a refresh failure keeps serving
   the last-known-good metadata rather than logging every active session
   out, but the *first* fetch (nothing cached yet) fails closed — there's
   no sensible degraded behavior without at least one working fetch.

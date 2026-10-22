@@ -29,6 +29,12 @@ const defaultSAMLRetry = 30 * time.Second
 // transport.
 const samlHTTPTimeout = 10 * time.Second
 
+// samlMinMetadataRefresh is the shortest interval between IdP metadata
+// fetches when a signing certificate in the cached metadata is about to
+// expire, or already has: refetching on every request while the IdP still
+// publishes an expired certificate would hammer it.
+const samlMinMetadataRefresh = time.Minute
+
 // samlSessionSigningKeyMinLen mirrors config's minSessionSigningKeyLen
 // (unexported there, so not directly reusable) — re-checked here at
 // build time so a rebuild triggered by an unrelated config change
@@ -76,7 +82,8 @@ type SAMLRegistry struct {
 	mu          sync.Mutex
 	fingerprint string
 	provider    *samlsp.Middleware
-	metadataAt  time.Time // when provider's IdP metadata was last (re)fetched
+	refreshAt   time.Time // when provider's IdP metadata is next due for a refetch
+	certExpiry  time.Time // earliest signing-cert expiry in that metadata; zero if unknown
 	lastErr     error
 	nextTry     time.Time
 }
@@ -198,7 +205,7 @@ func (r *SAMLRegistry) Provider(src config.SAMLSource) (*samlsp.Middleware, erro
 	}
 
 	if r.provider != nil {
-		if r.now().Before(r.metadataAt.Add(src.IDPMetadataCacheTTL)) {
+		if r.now().Before(r.refreshAt) {
 			return r.provider, nil
 		}
 
@@ -209,16 +216,17 @@ func (r *SAMLRegistry) Provider(src config.SAMLSource) (*samlsp.Middleware, erro
 		// first-build path below, which fails closed. See
 		// buildSAMLProvider's doc comment for the same asymmetry
 		// stated from the config-schema side.
-		provider, err := r.fetchAndBuild(src)
+		provider, expiry, err := r.fetchAndBuild(src)
 		if err != nil {
 			r.logger.Warn("failed to refresh saml idp metadata; continuing to serve the previous provider", "err", err)
 			// Reset the clock so this doesn't retry on every single
 			// request during an outage — one attempt per TTL window.
-			r.metadataAt = r.now()
+			r.refreshAt = samlRefreshAt(r.now(), src.IDPMetadataCacheTTL, r.certExpiry)
 			return r.provider, nil
 		}
 		r.provider = provider
-		r.metadataAt = r.now()
+		r.certExpiry = expiry
+		r.refreshAt = samlRefreshAt(r.now(), src.IDPMetadataCacheTTL, expiry)
 		r.logger.Info("refreshed saml provider")
 		return r.provider, nil
 	}
@@ -231,7 +239,7 @@ func (r *SAMLRegistry) Provider(src config.SAMLSource) (*samlsp.Middleware, erro
 		return nil, r.lastErr
 	}
 
-	provider, err := r.fetchAndBuild(src)
+	provider, expiry, err := r.fetchAndBuild(src)
 	if err != nil {
 		r.lastErr = err
 		r.nextTry = r.now().Add(r.retry)
@@ -239,7 +247,8 @@ func (r *SAMLRegistry) Provider(src config.SAMLSource) (*samlsp.Middleware, erro
 	}
 
 	r.provider = provider
-	r.metadataAt = r.now()
+	r.certExpiry = expiry
+	r.refreshAt = samlRefreshAt(r.now(), src.IDPMetadataCacheTTL, expiry)
 	r.lastErr = nil
 	r.logger.Info("built saml provider", "idp_metadata_url", src.IDPMetadataURL)
 
@@ -256,18 +265,18 @@ func (r *SAMLRegistry) Provider(src config.SAMLSource) (*samlsp.Middleware, erro
 // ACS/assertion failure is bridged to structured slog logging (see
 // samlOnError's doc comment) rather than samlsp's default
 // unstructured log.Printf.
-func (r *SAMLRegistry) fetchAndBuild(src config.SAMLSource) (*samlsp.Middleware, error) {
+func (r *SAMLRegistry) fetchAndBuild(src config.SAMLSource) (*samlsp.Middleware, time.Time, error) {
 	fetchCtx, cancel := context.WithTimeout(r.ctx, samlHTTPTimeout)
 	defer cancel()
 
 	entity, err := fetchIDPMetadata(fetchCtx, r.client, src.IDPMetadataURL, src.Issuer)
 	if err != nil {
-		return nil, fmt.Errorf("fetch idp metadata: %w", err)
+		return nil, time.Time{}, fmt.Errorf("fetch idp metadata: %w", err)
 	}
 
 	provider, err := r.newProvider(src, entity)
 	if err != nil {
-		return nil, fmt.Errorf("build saml provider: %w", err)
+		return nil, time.Time{}, fmt.Errorf("build saml provider: %w", err)
 	}
 	provider.OnError = samlOnError(r.logger)
 
@@ -283,7 +292,7 @@ func (r *SAMLRegistry) fetchAndBuild(src config.SAMLSource) (*samlsp.Middleware,
 			"sp_base_url", src.SPBaseURL)
 	}
 
-	return provider, nil
+	return provider, idpSigningCertExpiry(entity), nil
 }
 
 // buildSAMLProvider is the production newSAMLProviderFunc.

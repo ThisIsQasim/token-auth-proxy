@@ -2,9 +2,13 @@ package authn
 
 import (
 	"context"
+	"crypto/x509"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/crewjam/saml"
 	"github.com/crewjam/saml/samlsp"
@@ -99,4 +103,64 @@ func validateIDPMetadataShape(entity *saml.EntityDescriptor) error {
 		return fmt.Errorf("no SingleSignOnService present")
 	}
 	return nil
+}
+
+// idpSigningCertExpiry returns the earliest NotAfter among the signing
+// certificates entity publishes that haven't expired yet, or among all of
+// them if every one already has. The zero time means no certificate could
+// be parsed, which leaves the cache lifetime to the TTL alone. During a
+// rollover the earliest still-valid expiry is the first moment the
+// published set changes, so that is when a refetch is due.
+func idpSigningCertExpiry(entity *saml.EntityDescriptor) time.Time {
+	return idpSigningCertExpiryAt(entity, time.Now())
+}
+
+func idpSigningCertExpiryAt(entity *saml.EntityDescriptor, now time.Time) time.Time {
+	var validEarliest, anyEarliest time.Time
+	for _, idp := range entity.IDPSSODescriptors {
+		for _, kd := range idp.KeyDescriptors {
+			if kd.Use != "" && kd.Use != "signing" {
+				continue
+			}
+			for _, c := range kd.KeyInfo.X509Data.X509Certificates {
+				der, err := base64.StdEncoding.DecodeString(strings.Join(strings.Fields(c.Data), ""))
+				if err != nil {
+					continue
+				}
+				cert, err := x509.ParseCertificate(der)
+				if err != nil {
+					continue
+				}
+				if anyEarliest.IsZero() || cert.NotAfter.Before(anyEarliest) {
+					anyEarliest = cert.NotAfter
+				}
+				if cert.NotAfter.After(now) && (validEarliest.IsZero() || cert.NotAfter.Before(validEarliest)) {
+					validEarliest = cert.NotAfter
+				}
+			}
+		}
+	}
+	if !validEarliest.IsZero() {
+		return validEarliest
+	}
+	return anyEarliest
+}
+
+// samlRefreshAt returns when metadata fetched at now is next due: after
+// ttl, or when its earliest signing certificate expires if that comes
+// sooner. The expiry-driven refetch is never sooner than
+// samlMinMetadataRefresh, so a certificate the IdP still publishes
+// expired doesn't trigger a refetch on every request.
+func samlRefreshAt(now time.Time, ttl time.Duration, certExpiry time.Time) time.Time {
+	at := now.Add(ttl)
+	if certExpiry.IsZero() || !certExpiry.Before(at) {
+		return at
+	}
+	if floor := now.Add(samlMinMetadataRefresh); certExpiry.Before(floor) {
+		if floor.After(at) {
+			return at
+		}
+		return floor
+	}
+	return certExpiry
 }
