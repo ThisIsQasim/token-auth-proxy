@@ -227,7 +227,7 @@ func NewMiddleware(source ConfigSource, jwtReg *Registry, samlReg *SAMLRegistry,
 					rejectUnavailable(w, logger, r, reasonSAMLMetadataUnavailable, err, samlReg.retry)
 					return
 				}
-				serveACS(mw, w, r)
+				serveACSRetrying(samlReg, samlSrc, mw, w, r)
 				return
 			}
 

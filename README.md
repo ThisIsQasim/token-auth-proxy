@@ -452,7 +452,12 @@ limitation below for exactly who that does and doesn't unblock.
   certificate isn't hammered); a refresh failure keeps serving
   the last-known-good metadata rather than logging every active session
   out, but the *first* fetch (nothing cached yet) fails closed — there's
-  no sensible degraded behavior without at least one working fetch.
+  no sensible degraded behavior without at least one working fetch. A
+  failed refresh is retried after 5 minutes (or the TTL, if shorter). An
+  ACS callback that fails validation triggers one extra fetch and a
+  second try with the fresh metadata, at most once a minute, so an IdP
+  that rotated its signing key doesn't lock users out until the cache
+  expires.
 - **`ca_cert`** (optional): a PEM CA bundle (or that same PEM,
   base64-encoded) used to verify the TLS certificate of
   `idp_metadata_url`, for an IdP behind a private CA. Like the JWT

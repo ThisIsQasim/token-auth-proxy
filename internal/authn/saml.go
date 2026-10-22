@@ -35,6 +35,12 @@ const samlHTTPTimeout = 10 * time.Second
 // publishes an expired certificate would hammer it.
 const samlMinMetadataRefresh = time.Minute
 
+// samlFailedRefreshBackoff is how long a failed metadata refresh waits
+// before the next attempt (never longer than the metadata TTL). A refresh
+// holds the registry lock for the whole fetch, so retrying every minute
+// against an IdP that is down would stall a request a minute.
+const samlFailedRefreshBackoff = 5 * time.Minute
+
 // samlSessionSigningKeyMinLen mirrors config's minSessionSigningKeyLen
 // (unexported there, so not directly reusable) — re-checked here at
 // build time so a rebuild triggered by an unrelated config change
@@ -83,6 +89,7 @@ type SAMLRegistry struct {
 	fingerprint string
 	provider    *samlsp.Middleware
 	refreshAt   time.Time // when provider's IdP metadata is next due for a refetch
+	fetchedAt   time.Time // when a metadata fetch was last attempted, for rate-limiting RefreshNow
 	certExpiry  time.Time // earliest signing-cert expiry in that metadata; zero if unknown
 	lastErr     error
 	nextTry     time.Time
@@ -217,12 +224,13 @@ func (r *SAMLRegistry) Provider(src config.SAMLSource) (*samlsp.Middleware, erro
 		// first-build path below, which fails closed. See
 		// buildSAMLProvider's doc comment for the same asymmetry
 		// stated from the config-schema side.
+		r.fetchedAt = r.now()
 		provider, expiry, err := r.fetchAndBuild(src)
 		if err != nil {
 			r.logger.Warn("failed to refresh saml idp metadata; continuing to serve the previous provider", "err", err)
-			// Reset the clock so this doesn't retry on every single
-			// request during an outage — one attempt per TTL window.
-			r.refreshAt = samlRefreshAt(r.now(), src.IDPMetadataCacheTTL, r.certExpiry)
+			// Back off so this doesn't retry on every single request during an
+			// outage.
+			r.refreshAt = r.now().Add(min(src.IDPMetadataCacheTTL, samlFailedRefreshBackoff))
 			return r.provider, nil
 		}
 		r.provider = provider
@@ -240,6 +248,7 @@ func (r *SAMLRegistry) Provider(src config.SAMLSource) (*samlsp.Middleware, erro
 		return nil, r.lastErr
 	}
 
+	r.fetchedAt = r.now()
 	provider, expiry, err := r.fetchAndBuild(src)
 	if err != nil {
 		r.lastErr = err
@@ -254,6 +263,40 @@ func (r *SAMLRegistry) Provider(src config.SAMLSource) (*samlsp.Middleware, erro
 	r.logger.Info("built saml provider", "idp_metadata_url", src.IDPMetadataURL)
 
 	return r.provider, nil
+}
+
+// RefreshNow refetches src's IdP metadata ahead of schedule, for an ACS
+// callback whose assertion failed validation: the usual cause is the IdP
+// having rotated its signing key since the metadata was cached. It returns
+// the new provider, or false when there is nothing to retry with: no
+// provider built yet, the source changed, the last fetch was under
+// samlMinMetadataRefresh ago (so a flood of bad assertions costs the IdP
+// one fetch a minute, not one per request), or the fetch failed.
+func (r *SAMLRegistry) RefreshNow(src config.SAMLSource) (*samlsp.Middleware, bool) {
+	fp := samlFingerprint(src)
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if fp != r.fingerprint || r.provider == nil {
+		return nil, false
+	}
+	now := r.now()
+	if now.Before(r.fetchedAt.Add(samlMinMetadataRefresh)) {
+		return nil, false
+	}
+
+	r.fetchedAt = now
+	provider, expiry, err := r.fetchAndBuild(src)
+	if err != nil {
+		r.logger.Warn("failed to refetch saml idp metadata after a failed assertion", "err", err)
+		return nil, false
+	}
+	r.provider = provider
+	r.certExpiry = expiry
+	r.refreshAt = samlRefreshAt(now, src.IDPMetadataCacheTTL, expiry)
+	r.logger.Info("refetched saml idp metadata after a failed assertion")
+	return provider, true
 }
 
 // fetchAndBuild fetches src's IdP metadata (bounded by the registry's

@@ -1,7 +1,9 @@
 package authn
 
 import (
+	"bytes"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -9,6 +11,8 @@ import (
 
 	"github.com/crewjam/saml"
 	"github.com/crewjam/saml/samlsp"
+
+	"github.com/ThisIsQasim/token-auth-proxy/internal/config"
 )
 
 // serveACS dispatches an inbound ACS callback (the IdP POSTing its
@@ -18,6 +22,65 @@ import (
 // structured logging automatically; nothing else needs to happen here.
 func serveACS(mw *samlsp.Middleware, w http.ResponseWriter, r *http.Request) {
 	mw.ServeACS(w, r)
+}
+
+// maxACSBodyBytes matches net/http's own cap on a form POST.
+const maxACSBodyBytes = 10 << 20
+
+// serveACSRetrying is serveACS with one second chance: a callback that
+// fails (403) may only have failed because the IdP rotated its signing key
+// or renewed its certificate since the metadata was cached, so the registry
+// is asked to refetch it and the same POST is validated again against the
+// fresh provider. The first attempt's response is held back until then, so
+// the browser only ever sees the final outcome. The refetch is
+// rate-limited by SAMLRegistry.RefreshNow, so this adds at most one IdP
+// fetch a minute however many bad callbacks arrive.
+func serveACSRetrying(reg *SAMLRegistry, src config.SAMLSource, mw *samlsp.Middleware, w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxACSBodyBytes))
+	if err != nil {
+		mw.OnError(w, r, err)
+		return
+	}
+	attempt := func(m *samlsp.Middleware) *bufferedResponse {
+		buf := newBufferedResponse()
+		r2 := r.Clone(r.Context())
+		r2.Body = io.NopCloser(bytes.NewReader(body))
+		r2.ContentLength = int64(len(body))
+		m.ServeACS(buf, r2)
+		return buf
+	}
+
+	result := attempt(mw)
+	if result.status == http.StatusForbidden {
+		if fresh, ok := reg.RefreshNow(src); ok {
+			result = attempt(fresh)
+		}
+	}
+	result.writeTo(w)
+}
+
+// bufferedResponse is an http.ResponseWriter that holds the response so a
+// caller can decide whether to send it.
+type bufferedResponse struct {
+	header http.Header
+	status int
+	body   bytes.Buffer
+}
+
+func newBufferedResponse() *bufferedResponse {
+	return &bufferedResponse{header: http.Header{}, status: http.StatusOK}
+}
+
+func (b *bufferedResponse) Header() http.Header         { return b.header }
+func (b *bufferedResponse) Write(p []byte) (int, error) { return b.body.Write(p) }
+func (b *bufferedResponse) WriteHeader(code int)        { b.status = code }
+
+func (b *bufferedResponse) writeTo(w http.ResponseWriter) {
+	for k, v := range b.header {
+		w.Header()[k] = v
+	}
+	w.WriteHeader(b.status)
+	_, _ = w.Write(b.body.Bytes())
 }
 
 // enforceSAML requires a valid SAML session for the request, via
