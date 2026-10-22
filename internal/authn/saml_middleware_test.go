@@ -126,7 +126,7 @@ func TestSAMLFullRoundTrip_SetsSessionCookieAndRedirectsToOriginalURI(t *testing
 
 	// Step 2: drive the real IdP login.
 	samlResponse := driveIDPLogin(t, startResp.Header.Get("Location"))
-	relayState := mustQueryParam(t, startResp.Header.Get("Location"), "RelayState")
+	relayState := relayStateOf(t, startResp.Header.Get("Location"))
 
 	// Step 3: POST the assertion back to the ACS endpoint, carrying the
 	// tracker cookie set in step 1.
@@ -155,11 +155,11 @@ func TestSAMLFullRoundTrip_SetsSessionCookieAndRedirectsToOriginalURI(t *testing
 	assert.Equal(t, "ok", protectedRR.Body.String())
 }
 
-func mustQueryParam(t *testing.T, rawURL, key string) string {
+func relayStateOf(t *testing.T, rawURL string) string {
 	t.Helper()
 	u, err := url.Parse(rawURL)
 	require.NoError(t, err)
-	return u.Query().Get(key)
+	return u.Query().Get("RelayState")
 }
 
 func TestEnforceSAML_InvalidSession_RedirectsNotRejects(t *testing.T) {
@@ -296,7 +296,7 @@ func TestSAMLFullRoundTrip_EncryptedAssertion_DecryptsAndAuthenticates(t *testin
 	assert.Contains(t, string(decoded), "EncryptedAssertion", "the idp must have actually encrypted the assertion, not sent it plaintext")
 	assert.NotContains(t, string(decoded), "AttributeStatement", "plaintext attributes must never appear on the wire when the assertion is encrypted")
 
-	form := url.Values{"SAMLResponse": {samlResponse}, "RelayState": {mustQueryParam(t, loc, "RelayState")}}
+	form := url.Values{"SAMLResponse": {samlResponse}, "RelayState": {relayStateOf(t, loc)}}
 	acsReq := httptest.NewRequestWithContext(t.Context(), http.MethodPost, src.ACSPath, strings.NewReader(form.Encode()))
 	acsReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	acsReq.AddCookie(tracker)

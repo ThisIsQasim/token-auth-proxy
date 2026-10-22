@@ -54,7 +54,7 @@ func postACS(t *testing.T, r *SAMLRegistry, src config.SAMLSource, samlResponse 
 
 	form := url.Values{
 		"SAMLResponse": {samlResponse(loginURL)},
-		"RelayState":   {mustQueryParam(t, loginURL, "RelayState")},
+		"RelayState":   {relayStateOf(t, loginURL)},
 	}
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, src.SPBaseURL+src.ACSPath, strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")

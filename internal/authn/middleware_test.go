@@ -637,7 +637,7 @@ func TestMiddleware_Composition_ValidSAMLSession_Forwards(t *testing.T) {
 	require.NotNil(t, tracker)
 
 	samlResponse := driveIDPLogin(t, startRR.Result().Header.Get("Location"))
-	relayState := mustQueryParam(t, startRR.Result().Header.Get("Location"), "RelayState")
+	relayState := relayStateOf(t, startRR.Result().Header.Get("Location"))
 
 	form := url.Values{"SAMLResponse": {samlResponse}, "RelayState": {relayState}}
 	acsReq := httptest.NewRequestWithContext(t.Context(), http.MethodPost, samlSrc.ACSPath, strings.NewReader(form.Encode()))
