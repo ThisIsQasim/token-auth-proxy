@@ -197,6 +197,7 @@ func NewMiddleware(source ConfigSource, jwtReg *Registry, samlReg *SAMLRegistry,
 		logger = slog.Default()
 	}
 	deps := loginDeps{saml: samlReg, basic: basicReg, login: loginReg}
+	regs := authRegistries{jwt: jwtReg, saml: samlReg, basic: basicReg, login: loginReg}
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -206,18 +207,12 @@ func NewMiddleware(source ConfigSource, jwtReg *Registry, samlReg *SAMLRegistry,
 			samlReg.Reconcile(cfg)
 			basicReg.Reconcile(cfg)
 
-			jwtEnabled := cfg.Inbound.Auth.JWTEnabled()
 			samlEnabled := cfg.Inbound.Auth.SAMLEnabled()
-			basicEnabled := cfg.Inbound.Auth.BasicEnabled()
 			loginMethodCount := cfg.Inbound.Auth.LoginMethodCount()
 
 			var samlSrc config.SAMLSource
 			if samlEnabled {
 				samlSrc = *cfg.Inbound.Auth.SAML
-			}
-			var basicSrc config.BasicSource
-			if basicEnabled {
-				basicSrc = *cfg.Inbound.Auth.Basic
 			}
 
 			// Step 1.
@@ -249,128 +244,165 @@ func NewMiddleware(source ConfigSource, jwtReg *Registry, samlReg *SAMLRegistry,
 				return
 			}
 
-			// Refresh cookies are taken off the request before any leg decides,
-			// so none of them can forward one to the backend.
-			refreshTokens := TakeRefreshCookies(r, cfg.Inbound.Auth)
-
-			// Step 2.
-			if basicEnabled {
-				outcome, username := enforceBasic(w, r, basicSrc, basicReg, logger)
-				switch outcome {
-				case basicAllowed:
-					// Forwarded byte-for-byte unchanged, like the other
-					// legs — the Authorization header included, since
-					// stripping it would break a backend that does its
-					// own thing with the same credential.
-					if authorize(w, r, cfg.ACL, basicPrincipal(username), logger) {
-						next.ServeHTTP(w, r)
-					}
-					return
-				case basicRejected:
-					return
-				case basicNoCredential:
-					// Fall through to step 3/4/5 below.
+			authenticate(w, r, cfg, regs, logger, func(p *principal, r *http.Request) {
+				if authorize(w, r, cfg.ACL, p, logger) {
+					next.ServeHTTP(w, r)
 				}
-			}
-
-			// Step 3.
-			if jwtEnabled {
-				if loginReg.Refresh(w, r, cfg, refreshTokens) {
-					return
-				}
-				outcome, p := enforceJWT(w, r, cfg, jwtReg, logger)
-				if outcome == jwtStale {
-					// Drop the stale login cookie, then try to renew the session
-					// with the refresh token; failing that, the request is simply
-					// credential-less and falls through to login or the 401 below.
-					loginReg.DropStaleLogin(w, r, cfg)
-					if loginReg.Refresh(w, r, cfg, refreshTokens) {
-						return
-					}
-					outcome, p = enforceJWT(w, r, cfg, jwtReg, logger)
-				}
-				switch outcome {
-				case jwtAllowed:
-					// Forwarded byte-for-byte unchanged: no identity
-					// headers injected, no request mutation — not
-					// promised anywhere in the schema, and real scope
-					// creep to add here.
-					if authorize(w, r, cfg.ACL, p, logger) {
-						next.ServeHTTP(w, r)
-					}
-					return
-				case jwtRejected:
-					return
-				case jwtStale:
-					// Unreachable: the stale cookie was dropped above, so
-					// enforceJWT cannot report it again.
-					reject(w, logger, r, reasonInvalidClaims)
-					return
-				case jwtNoCredential:
-					// Fall through to step 4/5 below.
-				}
-			}
-
-			// Step 4. With two or more interactive methods, a browser
-			// navigation goes to the method it picked before, or to the
-			// picker; with exactly one, that method runs directly.
-			nav := browserNav(r)
-			if loginMethodCount >= 2 && nav {
-				methods := loginMethods(cfg.Inbound.Auth)
-				m, ok := chosenMethod(r, methods)
-				if !ok {
-					redirectToPicker(w, r)
-					return
-				}
-				switch m.kind {
-				case "basic":
-					serveBasicChallengePage(w, r, cfg.Inbound.Auth, logger)
-					return
-				case "jwt":
-					src := jwtLoginSource(cfg.Inbound.Auth, m.source)
-					loginReg.Start(w, r, src, r.URL.RequestURI())
-					return
-				}
-				// "saml" runs below.
-			}
-			if samlEnabled {
-				mw, err := samlReg.Provider(samlSrc)
-				if err != nil {
-					rejectUnavailable(w, logger, r, reasonSAMLMetadataUnavailable, err, samlReg.retry)
-					return
-				}
-				enforceSAML(mw, aclHandler(cfg.ACL, logger, next)).ServeHTTP(w, r)
-				return
-			}
-			if loginMethodCount == 1 && nav {
-				// Only a JWT login source can be the one method here: SAML
-				// returned above, and a lone Basic source falls through to
-				// the 401 challenge below.
-				if srcs := cfg.Inbound.Auth.LoginSources(); len(srcs) == 1 {
-					loginReg.Start(w, r, srcs[0], r.URL.RequestURI())
-					return
-				}
-			}
-
-			// Step 5.
-			if jwtEnabled || basicEnabled {
-				var challenges []string
-				if basicEnabled {
-					challenges = append(challenges, basicChallenge(basicSrc.Realm))
-				}
-				if jwtEnabled {
-					challenges = append(challenges, bearerChallenge)
-				}
-				rejectChallenges(w, logger, r, reasonNoCredential, challenges)
-				return
-			}
-
-			// Step 6. No identity exists, so any ACL rule denies.
-			if authorize(w, r, cfg.ACL, nil, logger) {
-				next.ServeHTTP(w, r)
-			}
+			})
 		})
 	}
+}
+
+// authRegistries bundles the per-method registries authenticate consults.
+type authRegistries struct {
+	jwt   *Registry
+	saml  *SAMLRegistry
+	basic *BasicRegistry
+	login *LoginRegistry
+}
+
+// authenticate runs steps 2 to 6 of NewMiddleware's precedence order and
+// hands the outcome to allow: allow(p, r) is called, exactly once, when a
+// leg accepts the request (or none is enabled, p == nil), with the
+// principal it identified and the request to forward (SAML's carries the
+// session in its context). When a leg instead writes a response of its
+// own (a 401 challenge, an IdP redirect, a login page, a 503), allow is
+// never called. Deciding what an accepted request is then allowed to do
+// is allow's job, which keeps this reusable by routes that need to know
+// who is logged in without forwarding anything.
+func authenticate(w http.ResponseWriter, r *http.Request, cfg *config.Config, regs authRegistries, logger *slog.Logger, allow func(*principal, *http.Request)) {
+	jwtReg, samlReg, basicReg, loginReg := regs.jwt, regs.saml, regs.basic, regs.login
+
+	jwtEnabled := cfg.Inbound.Auth.JWTEnabled()
+	samlEnabled := cfg.Inbound.Auth.SAMLEnabled()
+	basicEnabled := cfg.Inbound.Auth.BasicEnabled()
+	loginMethodCount := cfg.Inbound.Auth.LoginMethodCount()
+
+	var samlSrc config.SAMLSource
+	if samlEnabled {
+		samlSrc = *cfg.Inbound.Auth.SAML
+	}
+	var basicSrc config.BasicSource
+	if basicEnabled {
+		basicSrc = *cfg.Inbound.Auth.Basic
+	}
+
+	// Refresh cookies are taken off the request before any leg decides,
+	// so none of them can forward one to the backend.
+	refreshTokens := TakeRefreshCookies(r, cfg.Inbound.Auth)
+
+	// Step 2.
+	if basicEnabled {
+		outcome, username := enforceBasic(w, r, basicSrc, basicReg, logger)
+		switch outcome {
+		case basicAllowed:
+			// Forwarded byte-for-byte unchanged, like the other
+			// legs — the Authorization header included, since
+			// stripping it would break a backend that does its
+			// own thing with the same credential.
+			allow(basicPrincipal(username), r)
+			return
+		case basicRejected:
+			return
+		case basicNoCredential:
+			// Fall through to step 3/4/5 below.
+		}
+	}
+
+	// Step 3.
+	if jwtEnabled {
+		if loginReg.Refresh(w, r, cfg, refreshTokens) {
+			return
+		}
+		outcome, p := enforceJWT(w, r, cfg, jwtReg, logger)
+		if outcome == jwtStale {
+			// Drop the stale login cookie, then try to renew the session
+			// with the refresh token; failing that, the request is simply
+			// credential-less and falls through to login or the 401 below.
+			loginReg.DropStaleLogin(w, r, cfg)
+			if loginReg.Refresh(w, r, cfg, refreshTokens) {
+				return
+			}
+			outcome, p = enforceJWT(w, r, cfg, jwtReg, logger)
+		}
+		switch outcome {
+		case jwtAllowed:
+			// Forwarded byte-for-byte unchanged: no identity
+			// headers injected, no request mutation — not
+			// promised anywhere in the schema, and real scope
+			// creep to add here.
+			allow(p, r)
+			return
+		case jwtRejected:
+			return
+		case jwtStale:
+			// Unreachable: the stale cookie was dropped above, so
+			// enforceJWT cannot report it again.
+			reject(w, logger, r, reasonInvalidClaims)
+			return
+		case jwtNoCredential:
+			// Fall through to step 4/5 below.
+		}
+	}
+
+	// Step 4. With two or more interactive methods, a browser
+	// navigation goes to the method it picked before, or to the
+	// picker; with exactly one, that method runs directly.
+	nav := browserNav(r)
+	if loginMethodCount >= 2 && nav {
+		methods := loginMethods(cfg.Inbound.Auth)
+		m, ok := chosenMethod(r, methods)
+		if !ok {
+			redirectToPicker(w, r)
+			return
+		}
+		switch m.kind {
+		case "basic":
+			serveBasicChallengePage(w, r, cfg.Inbound.Auth, logger)
+			return
+		case "jwt":
+			src := jwtLoginSource(cfg.Inbound.Auth, m.source)
+			loginReg.Start(w, r, src, r.URL.RequestURI())
+			return
+		}
+		// "saml" runs below.
+	}
+	if samlEnabled {
+		mw, err := samlReg.Provider(samlSrc)
+		if err != nil {
+			rejectUnavailable(w, logger, r, reasonSAMLMetadataUnavailable, err, samlReg.retry)
+			return
+		}
+		enforceSAML(mw, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			allow(samlSessionPrincipal(r), r)
+		})).ServeHTTP(w, r)
+		return
+	}
+	if loginMethodCount == 1 && nav {
+		// Only a JWT login source can be the one method here: SAML
+		// returned above, and a lone Basic source falls through to
+		// the 401 challenge below.
+		if srcs := cfg.Inbound.Auth.LoginSources(); len(srcs) == 1 {
+			loginReg.Start(w, r, srcs[0], r.URL.RequestURI())
+			return
+		}
+	}
+
+	// Step 5.
+	if jwtEnabled || basicEnabled {
+		var challenges []string
+		if basicEnabled {
+			challenges = append(challenges, basicChallenge(basicSrc.Realm))
+		}
+		if jwtEnabled {
+			challenges = append(challenges, bearerChallenge)
+		}
+		rejectChallenges(w, logger, r, reasonNoCredential, challenges)
+		return
+	}
+
+	// Step 6. No identity exists, so any ACL rule denies.
+	allow(nil, r)
 }
 
 // basicOutcome is enforceBasic's tri-state result, mirroring

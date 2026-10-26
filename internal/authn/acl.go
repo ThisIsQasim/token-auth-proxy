@@ -78,22 +78,14 @@ func authorize(w http.ResponseWriter, r *http.Request, rules []config.ACLRule, p
 	return false
 }
 
-// aclHandler applies authorize to the SAML leg, whose identity only
-// exists in the request context once samlsp.RequireAccount has accepted
-// the session.
-func aclHandler(rules []config.ACLRule, logger *slog.Logger, next http.Handler) http.Handler {
-	if len(rules) == 0 {
-		return next
+// samlSessionPrincipal is the identity of the SAML session in r's context,
+// or nil when there is none (samlsp.RequireAccount puts it there once it
+// has accepted the session).
+func samlSessionPrincipal(r *http.Request) *principal {
+	if s := samlsp.SessionFromContext(r.Context()); s != nil {
+		return samlPrincipal(s)
 	}
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var p *principal
-		if s := samlsp.SessionFromContext(r.Context()); s != nil {
-			p = samlPrincipal(s)
-		}
-		if authorize(w, r, rules, p, logger) {
-			next.ServeHTTP(w, r)
-		}
-	})
+	return nil
 }
 
 func aclAllows(rules []config.ACLRule, p *principal, method, path string) bool {
