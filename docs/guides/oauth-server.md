@@ -65,6 +65,11 @@ acl:
 `inbound.oauth_server` and `outbound.token` go together, and at least one way to log
 in must be configured.
 
+If the backend is an `https` URL whose certificate comes from a private CA (an OpenSearch
+cluster with operator-issued certificates, say), set `target_ca_cert` to that CA bundle, for
+example `target_ca_cert: ${file:/etc/opensearch-ca/ca.crt}`. It replaces the system roots for
+the backend connection, and the server name is still checked.
+
 **`inbound.oauth_server`**
 
 | Field | Default | Meaning |

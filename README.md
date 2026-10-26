@@ -33,9 +33,9 @@ task-oriented guides (Basic, JWT, SAML, OIDC login, hot-reload, observability), 
   - If `--config`/`TAP_CONFIG` isn't set at all, the proxy runs with a
     static configuration built entirely from flags/env — no file, no
     watch, no hot-reload.
-- `listen_addr` and `timeouts` are the only fields that *don't*
-  hot-reload: they're read once, when the listener/transport are built
-  at startup, so a later file change to those is logged as requiring a
+- `listen_addr`, `timeouts` and `target_ca_cert` are the only fields that
+  *don't* hot-reload: they're read once, when the listener/transport are
+  built at startup, so a later file change to those is logged as requiring a
   restart, not silently ignored. Everything else hot-reloads at
   runtime: `target`, `inbound.auth` (the trusted Basic/JWT/SAML
   sources and the login page, see [Auth](#auth) below) and `acl`.
@@ -56,6 +56,7 @@ for the file form:
 |---|---|---|---|
 | `--config` | `TAP_CONFIG` | *(n/a — this selects the file itself)* | — |
 | `--target` | `TAP_TARGET` | `target` | *(required if `--config` isn't set)* |
+| `--target-ca-cert` | `TAP_TARGET_CA_CERT` | `target_ca_cert` | *(none: the system roots verify an `https` target)* |
 | `--listen-addr` | `TAP_LISTEN_ADDR` | `listen_addr` | `:8080` |
 | `--timeout-read-header` | `TAP_TIMEOUT_READ_HEADER` | `timeouts.read_header` | `5s` |
 | `--timeout-read` | `TAP_TIMEOUT_READ` | `timeouts.read` | `30s` |
@@ -79,6 +80,13 @@ token-auth-proxy --target http://localhost:9000 --listen-addr :8080
 
 `GET /healthz` always returns `200 OK` without touching the backend —
 mount it as a Kubernetes liveness/readiness probe.
+
+**An `https` target with a private CA.** Set `target_ca_cert` to the CA bundle (PEM, or
+that PEM base64 encoded; in YAML `target_ca_cert: "${file:/path/to/ca.crt}"`). It
+*replaces* the system roots for the backend connection, like a source's `ca_cert`, so a
+wrong bundle fails the connection instead of quietly falling back to public trust. The
+server name is still verified against the certificate. It only applies to an `https`
+target, and is read at startup: changing it needs a restart.
 
 ### Value references (`${env:...}` / `${file:...}`)
 

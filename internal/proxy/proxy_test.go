@@ -2,8 +2,15 @@ package proxy
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"io"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -172,4 +179,71 @@ func TestHealthzHandler(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "ok", rec.Body.String())
+}
+
+// tlsBackend serves a certificate no public CA vouches for, and returns it as
+// a PEM CA bundle: the self-signed leaf is its own trust anchor.
+func tlsBackend(t *testing.T) (url, caPEM string) {
+	t.Helper()
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("tls-backend-response"))
+	}))
+	t.Cleanup(srv.Close)
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw})
+	return srv.URL, string(pemBytes)
+}
+
+// otherCAPEM is a self-signed CA that has nothing to do with the backend's certificate.
+// (httptest's TLS servers all share one built-in certificate, so another of them would not do.)
+func otherCAPEM(t *testing.T) string {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "unrelated test CA"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	require.NoError(t, err)
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+}
+
+// serveVia proxies one GET to the target of cfg with the transport BuildTransport makes for it.
+func serveVia(t *testing.T, cfg *config.Config) *httptest.ResponseRecorder {
+	t.Helper()
+	cfg.ListenAddr = ":0"
+	require.NoError(t, cfg.Validate())
+	source := &fakeSource{tb: t}
+	source.current.Store(cfg)
+
+	rp := New(source, testLogger(), BuildTransport(cfg))
+	rec := httptest.NewRecorder()
+	rp.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil))
+	return rec
+}
+
+func TestBuildTransport_TargetCACert(t *testing.T) {
+	url, caPEM := tlsBackend(t)
+
+	t.Run("an https backend with a private CA is refused without it", func(t *testing.T) {
+		rec := serveVia(t, &config.Config{Target: url})
+		assert.Equal(t, http.StatusBadGateway, rec.Code)
+		assert.NotContains(t, rec.Body.String(), "tls-backend-response")
+	})
+
+	t.Run("and proxied with it", func(t *testing.T) {
+		rec := serveVia(t, &config.Config{Target: url, TargetCACert: caPEM})
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, "tls-backend-response", rec.Body.String())
+	})
+
+	t.Run("a different CA does not verify it, and the system roots are not added back", func(t *testing.T) {
+		rec := serveVia(t, &config.Config{Target: url, TargetCACert: otherCAPEM(t)})
+		assert.Equal(t, http.StatusBadGateway, rec.Code)
+	})
 }

@@ -38,6 +38,8 @@ var fieldSpecs = []fieldSpec{
 		usage: "address to listen on (env TAP_LISTEN_ADDR)"},
 	{koanfKey: "target", flagName: "target", envName: "TARGET",
 		usage: "backend URL to forward every request to (env TAP_TARGET); required if --config is not set"},
+	{koanfKey: "target_ca_cert", flagName: "target-ca-cert", envName: "TARGET_CA_CERT",
+		usage: "PEM (or base64 PEM) CA bundle that verifies an https target, replacing the system roots for it (env TAP_TARGET_CA_CERT)"},
 	{koanfKey: "timeouts.read_header", flagName: "timeout-read-header", envName: "TIMEOUT_READ_HEADER",
 		usage: "response header read timeout (env TAP_TIMEOUT_READ_HEADER)", duration: true},
 	{koanfKey: "timeouts.read", flagName: "timeout-read", envName: "TIMEOUT_READ",

@@ -3,6 +3,7 @@
 package proxy
 
 import (
+	"crypto/tls"
 	"log/slog"
 	"net"
 	"net/http"
@@ -61,6 +62,12 @@ func BuildTransport(cfg *config.Config) http.RoundTripper {
 		DialContext:           dialer.DialContext,
 		ResponseHeaderTimeout: cfg.Timeouts.ResponseHeader,
 		ForceAttemptHTTP2:     true,
+	}
+	// A backend with a private CA is verified against it alone (not the system
+	// roots plus it), with the usual server name check. Setting TLSClientConfig
+	// turns off the automatic HTTP/2, which ForceAttemptHTTP2 above restores.
+	if pool := cfg.TargetCAPool(); pool != nil {
+		base.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
 	}
 	return otelhttp.NewTransport(base)
 }

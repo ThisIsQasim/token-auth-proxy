@@ -3,6 +3,7 @@
 package config
 
 import (
+	"crypto/x509"
 	"fmt"
 	"net"
 	"net/url"
@@ -36,22 +37,31 @@ type TimeoutConfig struct {
 
 // Config is the proxy's configuration, as loaded from a YAML file.
 //
-// ListenAddr and Timeouts are the only fields that don't hot-reload:
-// they're consumed once at startup to build the listener and outbound
-// transport, so changing them requires a process restart. Every other
+// ListenAddr, Timeouts and TargetCACert are the only fields that don't
+// hot-reload: they're consumed once at startup to build the listener and
+// outbound transport, so changing them requires a process restart. Every other
 // field (Target, Inbound.Auth, ACL) hot-reloads while the process is
 // running — see Watcher.reload, which detects a hot-reloadable change
 // by excluding just these two fields rather than enumerating the rest,
 // so a future field added here needs no matching update there.
 type Config struct {
-	ListenAddr string         `yaml:"listen_addr"`
-	Target     string         `yaml:"target"`
-	Timeouts   TimeoutConfig  `yaml:"timeouts,omitempty"`
-	Inbound    InboundConfig  `yaml:"inbound,omitempty"`
-	Outbound   OutboundConfig `yaml:"outbound,omitempty"`
-	ACL        []ACLRule      `yaml:"acl,omitempty"`
+	ListenAddr string `yaml:"listen_addr"`
+	Target     string `yaml:"target"`
 
-	targetURL *url.URL
+	// TargetCACert is a PEM (or base64 PEM) CA bundle that verifies an https
+	// Target, for a backend with a private CA. Like a source's ca_cert it
+	// replaces the system roots for that connection instead of adding to them,
+	// so a mistake in it fails loudly. Only valid with an https Target. It is
+	// read once at startup with the transport, like ListenAddr and Timeouts.
+	TargetCACert string `yaml:"target_ca_cert,omitempty"`
+
+	Timeouts TimeoutConfig  `yaml:"timeouts,omitempty"`
+	Inbound  InboundConfig  `yaml:"inbound,omitempty"`
+	Outbound OutboundConfig `yaml:"outbound,omitempty"`
+	ACL      []ACLRule      `yaml:"acl,omitempty"`
+
+	targetURL    *url.URL
+	targetCAPool *x509.CertPool
 }
 
 // applyDefaults fills in zero-value fields with their defaults.
@@ -128,8 +138,26 @@ func (c *Config) Validate() error {
 		return err
 	}
 
+	c.targetCAPool = nil
+	if c.TargetCACert != "" {
+		if u.Scheme != "https" {
+			return fmt.Errorf("target_ca_cert only applies to an https target, not %q", c.Target)
+		}
+		pool, err := ParseCACertPool(c.TargetCACert)
+		if err != nil {
+			return fmt.Errorf("target_ca_cert: %w", err)
+		}
+		c.targetCAPool = pool
+	}
+
 	c.targetURL = u
 	return nil
+}
+
+// TargetCAPool returns the CA pool that verifies an https Target, or nil when
+// the system roots apply. It is nil until Validate has succeeded.
+func (c *Config) TargetCAPool() *x509.CertPool {
+	return c.targetCAPool
 }
 
 // TargetURL returns the parsed backend target URL. It is nil until
