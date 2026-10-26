@@ -77,6 +77,13 @@ func (c *Config) applyDefaults() {
 		c.Timeouts.ResponseHeader = defaultResponseHeaderTimeout
 	}
 	c.Inbound.applyDefaults()
+	if c.Outbound.Token != nil {
+		var mcpURL string
+		if c.Inbound.OAuthServer != nil {
+			mcpURL = c.Inbound.OAuthServer.MCPURL
+		}
+		c.Outbound.Token.applyDefaults(mcpURL)
+	}
 	applyACLDefaults(c.ACL)
 }
 
@@ -100,7 +107,11 @@ func (c *Config) Validate() error {
 		return err
 	}
 
-	if err := validateACL(c.ACL, c.Inbound.Auth); err != nil {
+	if err := c.validateOAuth(); err != nil {
+		return err
+	}
+
+	if err := validateACL(c.ACL, c.Inbound.Auth, c.OAuthEnabled()); err != nil {
 		return err
 	}
 

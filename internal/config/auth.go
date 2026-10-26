@@ -50,28 +50,37 @@ var allowedAlgorithms = map[string]bool{
 var allowedCredentialLocations = map[string]bool{"header": true, "cookie": true, "query": true}
 
 // InboundConfig groups configuration about requests arriving at the
-// proxy. Auth is its only facet today; other inbound concerns (rate
-// limiting, IP allowlisting, ...) would live alongside it here later
-// without disturbing Config's top-level shape.
+// proxy: Auth (the credentials it trusts) and OAuthServer (the login MCP
+// clients use to obtain one). Other inbound concerns (rate limiting, IP
+// allowlisting, ...) would live alongside them here later without
+// disturbing Config's top-level shape.
 type InboundConfig struct {
-	Auth InboundAuthConfig `yaml:"auth,omitempty"`
+	Auth        InboundAuthConfig  `yaml:"auth,omitempty"`
+	OAuthServer *OAuthServerConfig `yaml:"oauth_server,omitempty"`
 }
 
-// applyDefaults delegates to Auth; Inbound has no other facets yet.
+// applyDefaults fills in each facet's defaults.
 func (i *InboundConfig) applyDefaults() {
 	i.Auth.applyDefaults()
+	if i.OAuthServer != nil {
+		i.OAuthServer.applyDefaults()
+	}
 }
 
-// Validate delegates to Auth; Inbound has no other facets yet.
+// Validate checks Auth; OAuthServer is checked with outbound.token by
+// Config.Validate, since the two only make sense together.
 func (i *InboundConfig) Validate() error {
 	return i.Auth.Validate()
 }
 
-// OutboundConfig mirrors InboundConfig for the backend leg. Reserved —
-// designed in a later pass (credential rewriting, e.g. verify an
-// inbound SAML assertion and mint an outbound OIDC-style JWT to attach
-// when forwarding). Deliberately empty this pass.
-type OutboundConfig struct{}
+// OutboundConfig mirrors InboundConfig for the backend leg: the credential
+// the backend receives. Token describes the JWTs the proxy issues itself
+// when inbound.oauth_server is enabled. Other forms of credential rewriting
+// (e.g. verify an inbound SAML assertion and mint a JWT to attach when
+// forwarding) are reserved for later.
+type OutboundConfig struct {
+	Token *TokenConfig `yaml:"token,omitempty"`
+}
 
 // InboundAuthConfig has no separate enabled/disabled switch of its own:
 // whether verification is enforced is purely inferred from whether at

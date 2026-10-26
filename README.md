@@ -67,6 +67,8 @@ for the file form:
 | `--inbound-auth-saml-json` | `TAP_INBOUND_AUTH_SAML_JSON` | `inbound.auth.saml` | *(none — file's source, if any, passes through)* |
 | `--inbound-auth-basic-json` | `TAP_INBOUND_AUTH_BASIC_JSON` | `inbound.auth.basic` | *(none — file's source, if any, passes through)* |
 | `--inbound-auth-login-page-json` | `TAP_INBOUND_AUTH_LOGIN_PAGE_JSON` | `inbound.auth.login_page` | *(none, file's value, if any, passes through)* |
+| `--inbound-oauth-server-json` | `TAP_INBOUND_OAUTH_SERVER_JSON` | `inbound.oauth_server` | *(none; the file's block, if any, passes through)* |
+| `--outbound-token-json` | `TAP_OUTBOUND_TOKEN_JSON` | `outbound.token` | *(none; the file's block, if any, passes through)* |
 | `--acl-json` | `TAP_ACL_JSON` | `acl` | *(none; the file's rules, if any, pass through)* |
 
 A no-file, flags-only run, for example:
@@ -135,9 +137,12 @@ unchanged and keep working.
 routing exists to pick among multiple IdPs by) and `inbound.auth.basic`
 (**at most one** source, for its own reason — a challenge names exactly
 one realm, and two user lists guarding one backend is one user list)
-describe trusted credential sources. `outbound` is reserved for a later
-pass (rewriting credentials on the backend leg, e.g. verifying an
-inbound SAML assertion and minting an outbound OIDC-style JWT). See
+describe trusted credential sources. `inbound.oauth_server` and
+`outbound.token`, which go together, turn the proxy into an OAuth server
+that issues tokens the backend trusts (documented under "OAuth server"
+once it ships); the rest of `outbound` is reserved for a later pass
+(rewriting credentials on the backend leg, e.g. verifying an inbound SAML
+assertion and minting an outbound OIDC-style JWT). See
 [`config.example.yaml`](./config.example.yaml) for a full commented-out
 example of each.
 

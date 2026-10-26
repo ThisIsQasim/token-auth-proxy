@@ -228,7 +228,44 @@ timeouts:
 #       #   MIIC...
 #       #   -----END CERTIFICATE-----
 #
-# outbound: {} # reserved for later: rewriting credentials on the backend leg
+# OAuth server. Lets MCP clients (Claude Code, claude.ai) log in through the
+# SAML or OIDC login above and get a token the backend trusts, with refresh,
+# without any state kept by the proxy. inbound.oauth_server and outbound.token
+# go together; the backend (OpenSearch, say) verifies the tokens against the
+# JWKS at <sp_base_url>/_tap/oauth/jwks.json. Everything it serves is under
+# /_tap/oauth. See the README's "OAuth server" section.
+#
+# inbound:
+#   oauth_server:
+#     sp_base_url: "https://os.example.com"            # the proxy's own origin
+#     mcp_url: "https://os.example.com/_plugins/_ml/mcp" # the protected endpoint; same origin
+#     code_ttl: 60s                                     # default
+#     refresh_absolute_lifetime: 24h                    # default; never extended by use
+#     sealing_keys:                                     # base64, 32 bytes each: openssl rand -base64 32
+#       - "${file:/keys/seal-current.key}"              # the first seals, all open (rotation)
+#       - "${file:/keys/seal-previous.key}"
+#     clients:                                          # public clients, PKCE required
+#       - id: claude-code
+#         redirect_uris:
+#           - http://localhost/callback                 # loopback matches any port
+#       - id: claude-ai
+#         redirect_uris:
+#           - https://claude.ai/api/mcp/auth_callback
+#     denylist:                                         # cuts off at once, hot-reloaded
+#       subjects:
+#         - former-employee@example.com
+#
+# outbound:
+#   token:
+#     signing_keys:                                     # ES256 (P-256) PEM; the first signs, all verify
+#       - kid: "2026-10"
+#         private_key: "${file:/keys/signing-2026-10.pem}"
+#     access_token_ttl: 15m                             # default
+#     audience: "https://os.example.com/_plugins/_ml/mcp" # default: mcp_url
+#     claims:                                           # names of the login claim or SAML attribute
+#       subject: sub                                    # defaults shown
+#       email: email
+#       groups: groups
 
 # Optional ACL rules, top-level. With none, every authenticated request
 # is allowed. With any, a request no rule matches gets a 403. A rule
