@@ -212,7 +212,7 @@ clients:
 ```
 
 Add the connector in **Customize > Connectors** (on a Team or Enterprise plan, an Owner adds it in
-**Organization settings > Connectors**, and members then connect with their own account). Enter the
+**Organization settings > Connectors**, and members then connect with their own account). The connector then shows up in the Claude mobile apps for the same account, where you turn it on from the **+** menu of a chat. Enter the
 `mcp_url` as the server URL and, under the OAuth client setting, choose **Use your own OAuth client**:
 client ID `claude-ai`, secret left blank, since it is a public client that relies on PKCE. The server
 does not offer Dynamic Client Registration or Client ID Metadata Documents, so the other two options
