@@ -1,6 +1,7 @@
 package oauth
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/json"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/zitadel/oidc/v3/pkg/oidc"
 	"github.com/zitadel/oidc/v3/pkg/op"
 
 	"github.com/ThisIsQasim/token-auth-proxy/internal/config"
@@ -35,6 +37,12 @@ type server struct {
 	issuer      string
 	callbackURL string
 	metadata    []byte
+	discovery   []byte
+
+	// wellKnown are the extra paths (RFC 9728 and RFC 8414 location rules for a
+	// resource and an issuer that have paths) that serve the two documents, so
+	// a client that does not follow the resource_metadata hint still finds them.
+	wellKnown   map[string][]byte
 	fingerprint string
 }
 
@@ -171,6 +179,11 @@ func (r *Registry) build(cfg *config.Config, fp string) (*server, error) {
 		return nil, fmt.Errorf("build provider: %w", err)
 	}
 
+	discovery, err := discoveryDocument(provider, st, issuer)
+	if err != nil {
+		return nil, err
+	}
+
 	metadata, err := json.Marshal(map[string]any{
 		"resource":                 srvCfg.MCPURL,
 		"authorization_servers":    []string{issuer},
@@ -190,6 +203,8 @@ func (r *Registry) build(cfg *config.Config, fp string) (*server, error) {
 		issuer:      issuer,
 		callbackURL: provider.AuthorizationEndpoint().Absolute(issuer) + "/callback",
 		metadata:    metadata,
+		discovery:   discovery,
+		wellKnown:   wellKnownPaths(srvCfg.MCPURL, metadata, discovery),
 		fingerprint: fp,
 	}, nil
 }
@@ -215,21 +230,92 @@ func (r *Registry) Denied(sub string) bool {
 	return cfg == nil || !cfg.OAuthEnabled() || cfg.Inbound.OAuthServer.Denylist.Contains(sub)
 }
 
+// Serves reports whether path is one the OAuth server answers: everything under
+// OAuthPathPrefix, and the well-known aliases of its two documents. It is false
+// while the server is off.
+func (r *Registry) Serves(path string) bool {
+	s := r.srv.Load()
+	if s == nil {
+		return false
+	}
+	_, alias := s.wellKnown[path]
+	return alias || path == config.OAuthPathPrefix || strings.HasPrefix(path, config.OAuthPathPrefix+"/")
+}
+
+// routes are the only paths under OAuthPathPrefix that reach the library. The
+// rest of what it mounts (token introspection, revocation, userinfo, end
+// session, device authorization, probes) is not something this server
+// supports, and revocation in particular would claim a success it cannot
+// deliver.
+var routes = map[string]bool{
+	"/authorize":          true,
+	"/authorize/callback": true,
+	"/token":              true,
+	"/jwks.json":          true,
+}
+
 // ServeHTTP serves every route under OAuthPathPrefix except the login hand
-// off, which needs the proxy's own authentication and is ServeLogin.
+// off, which needs the proxy's own authentication and is ServeLogin, and the
+// well-known aliases.
 func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	s := r.srv.Load()
 	if s == nil {
 		http.NotFound(w, req)
 		return
 	}
-	if req.URL.Path == config.OAuthPathPrefix+"/protected-resource" {
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Cache-Control", "public, max-age=300")
-		_, _ = w.Write(s.metadata)
+	if doc, ok := s.wellKnown[req.URL.Path]; ok {
+		serveJSON(w, doc)
 		return
 	}
-	s.handler.ServeHTTP(w, req)
+	switch rel := strings.TrimPrefix(req.URL.Path, config.OAuthPathPrefix); {
+	case rel == "/protected-resource":
+		serveJSON(w, s.metadata)
+	case rel == "/.well-known/openid-configuration":
+		serveJSON(w, s.discovery)
+	case routes[rel]:
+		s.handler.ServeHTTP(w, req)
+	default:
+		http.NotFound(w, req)
+	}
+}
+
+func serveJSON(w http.ResponseWriter, doc []byte) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	_, _ = w.Write(doc)
+}
+
+// discoveryDocument is the provider's own, cut down to what this server does:
+// the authorization code grant with refresh, for public clients with PKCE.
+func discoveryDocument(provider *op.Provider, st *storage, issuer string) ([]byte, error) {
+	d := op.CreateDiscoveryConfig(op.ContextWithIssuer(context.Background(), issuer), provider, st)
+	d.IntrospectionEndpoint, d.UserinfoEndpoint, d.RevocationEndpoint = "", "", ""
+	d.EndSessionEndpoint, d.DeviceAuthorizationEndpoint, d.CheckSessionIframe = "", "", ""
+	d.RevocationEndpointAuthMethodsSupported, d.RevocationEndpointAuthSigningAlgValuesSupported = nil, nil
+	d.IntrospectionEndpointAuthMethodsSupported, d.IntrospectionEndpointAuthSigningAlgValuesSupported = nil, nil
+	d.UserinfoSigningAlgValuesSupported, d.RequestObjectSigningAlgValuesSupported = nil, nil
+	d.GrantTypesSupported = []oidc.GrantType{oidc.GrantTypeCode, oidc.GrantTypeRefreshToken}
+	d.ResponseTypesSupported = []string{string(oidc.ResponseTypeCode)}
+	d.ResponseModesSupported = []string{"query"}
+	d.TokenEndpointAuthMethodsSupported = []oidc.AuthMethod{oidc.AuthMethodNone}
+	d.TokenEndpointAuthSigningAlgValuesSupported = nil
+	return json.Marshal(d)
+}
+
+// wellKnownPaths maps the alternative locations of the two documents to them:
+// the protected resource metadata of the MCP URL (RFC 9728, with and without
+// the resource path) and the authorization server metadata of the issuer
+// (RFC 8414 and OpenID discovery, with the issuer path inserted).
+func wellKnownPaths(mcpURL string, metadata, discovery []byte) map[string][]byte {
+	paths := map[string][]byte{
+		"/.well-known/oauth-protected-resource":                            metadata,
+		"/.well-known/oauth-authorization-server" + config.OAuthPathPrefix: discovery,
+		"/.well-known/openid-configuration" + config.OAuthPathPrefix:       discovery,
+	}
+	if u, err := url.Parse(mcpURL); err == nil && u.Path != "" && u.Path != "/" {
+		paths["/.well-known/oauth-protected-resource"+u.Path] = metadata
+	}
+	return paths
 }
 
 // Authenticator authenticates the person behind a browser request with the

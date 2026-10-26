@@ -83,6 +83,13 @@ func newEnv(t *testing.T) *env {
 		}, func(string, string, []string) bool { return e.allowed })
 	})
 	mux.Handle(config.OAuthPathPrefix+"/", e.reg)
+	mux.HandleFunc("/.well-known/", func(w http.ResponseWriter, r *http.Request) {
+		if e.reg.Serves(r.URL.Path) {
+			e.reg.ServeHTTP(w, r)
+			return
+		}
+		http.NotFound(w, r)
+	})
 	e.srv = httptest.NewServer(mux)
 	t.Cleanup(e.srv.Close)
 	e.base = e.srv.URL
@@ -588,4 +595,88 @@ func TestRegistry_ReconcileIsIdempotent(t *testing.T) {
 	e.reg.Reconcile(cfg)
 	e.reg.Reconcile(e.config()) // an equal config, as a reload with no change produces
 	assert.Same(t, built, e.reg.srv.Load())
+}
+
+func TestRoutes_OnlyWhatIsSupported(t *testing.T) {
+	e := newEnv(t)
+	for _, path := range []string{"/revoke", "/userinfo", "/end_session", "/oauth/introspect", "/introspect", "/device_authorization", "/healthz", "/ready", "/nope", "/jwks"} {
+		for _, method := range []string{http.MethodGet, http.MethodPost} {
+			r := e.do(method, e.issuer()+path, url.Values{"token": {"x"}})
+			assert.Equal(t, http.StatusNotFound, r.StatusCode, "%s %s is not something this server does", method, path)
+		}
+	}
+	assert.Equal(t, http.StatusOK, e.get(e.issuer()+"/jwks.json").StatusCode)
+}
+
+func TestDiscovery_ListsOnlyWhatWorks(t *testing.T) {
+	e := newEnv(t)
+	var doc map[string]any
+	require.NoError(t, json.Unmarshal(e.get(e.issuer()+"/.well-known/openid-configuration").Body, &doc))
+
+	for _, gone := range []string{
+		"introspection_endpoint", "userinfo_endpoint", "revocation_endpoint", "end_session_endpoint",
+		"device_authorization_endpoint", "check_session_iframe", "revocation_endpoint_auth_methods_supported",
+		"introspection_endpoint_auth_methods_supported",
+	} {
+		assert.NotContains(t, doc, gone, "not advertised: it would not work")
+	}
+	assert.Equal(t, []any{"authorization_code", "refresh_token"}, doc["grant_types_supported"])
+	assert.Equal(t, []any{"none"}, doc["token_endpoint_auth_methods_supported"], "public clients only")
+	assert.Equal(t, []any{"S256"}, doc["code_challenge_methods_supported"])
+	assert.Equal(t, []any{"code"}, doc["response_types_supported"])
+	assert.Equal(t, e.issuer()+"/authorize", doc["authorization_endpoint"])
+}
+
+func TestWellKnownAliases(t *testing.T) {
+	e := newEnv(t)
+	discovery := e.get(e.issuer() + "/.well-known/openid-configuration").Body
+	resource := e.get(e.issuer() + "/protected-resource").Body
+
+	for path, want := range map[string][]byte{
+		"/.well-known/oauth-protected-resource":                            resource,
+		"/.well-known/oauth-protected-resource/mcp":                        resource,
+		"/.well-known/oauth-authorization-server" + config.OAuthPathPrefix: discovery,
+		"/.well-known/openid-configuration" + config.OAuthPathPrefix:       discovery,
+	} {
+		r := e.get(e.base + path)
+		assert.Equal(t, http.StatusOK, r.StatusCode, path)
+		assert.JSONEq(t, string(want), string(r.Body), path)
+		assert.True(t, e.reg.Serves(path), path)
+	}
+
+	for _, path := range []string{
+		"/.well-known/oauth-authorization-server", // the issuer has a path: only its inserted form is its metadata
+		"/.well-known/openid-configuration",
+		"/.well-known/oauth-protected-resource/other",
+		"/.well-known/security.txt",
+		"/mcp",
+	} {
+		assert.False(t, e.reg.Serves(path), path)
+		assert.Equal(t, http.StatusNotFound, e.get(e.base+path).StatusCode, path)
+	}
+	assert.True(t, e.reg.Serves(config.OAuthPathPrefix+"/login"))
+	assert.True(t, e.reg.Serves(config.OAuthPathPrefix))
+}
+
+func TestServes_FalseWhileOff(t *testing.T) {
+	e := newEnv(t)
+	e.disabled = true
+	e.reload()
+	assert.False(t, e.reg.Serves(config.OAuthPathPrefix+"/token"))
+	assert.False(t, e.reg.Serves("/.well-known/oauth-protected-resource"))
+}
+
+func TestFlow_OnlyTheCodeFlow(t *testing.T) {
+	e := newEnv(t)
+	_, challenge := newPKCE()
+	for _, responseType := range []string{"token", "id_token", "id_token token", "code id_token"} {
+		u := strings.Replace(e.authorizeURL(redirectURI, challenge), "response_type=code", "response_type="+url.QueryEscape(responseType), 1)
+		resp := e.get(u)
+		assert.NotContains(t, resp.Header.Get("Location"), "login?id=", "response_type=%s must not start a login", responseType)
+	}
+
+	status, body := e.token(url.Values{"grant_type": {"client_credentials"}, "client_id": {"claude-code"}})
+	assert.NotEqual(t, http.StatusOK, status, "%v", body)
+	status, body = e.token(url.Values{"grant_type": {"urn:ietf:params:oauth:grant-type:device_code"}, "client_id": {"claude-code"}, "device_code": {"x"}})
+	assert.NotEqual(t, http.StatusOK, status, "%v", body)
 }

@@ -255,7 +255,7 @@ func NewMiddleware(source ConfigSource, jwtReg *Registry, samlReg *SAMLRegistry,
 				loginReg.serveLogout(w, r, cfg, logger)
 				return
 			}
-			if oauthReg != nil && cfg.OAuthEnabled() && isOAuthRoute(r.URL.Path) {
+			if oauthReg != nil && oauthReg.Serves(r.URL.Path) {
 				serveOAuth(w, r, cfg, regs, oauthReg, logger)
 				return
 			}

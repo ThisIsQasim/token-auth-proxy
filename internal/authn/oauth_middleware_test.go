@@ -178,13 +178,25 @@ func TestOAuthMW_ServerRoutesNeedNoCredential(t *testing.T) {
 		assert.Equal(t, http.StatusOK, r.Code, path)
 		assert.NotEqual(t, backendBody, r.Body, "served by the proxy, not the backend: %s", path)
 	}
+	// The same two documents at the locations a client that ignores the
+	// resource_metadata hint looks in.
+	for _, path := range []string{
+		"/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource" + mcpPath,
+		"/.well-known/oauth-authorization-server" + config.OAuthPathPrefix, "/.well-known/openid-configuration" + config.OAuthPathPrefix,
+	} {
+		r := m.send(http.MethodGet, m.base+path, nil, nil)
+		assert.Equal(t, http.StatusOK, r.Code, path)
+		assert.NotEqual(t, backendBody, r.Body, path)
+	}
+	r := m.send(http.MethodGet, m.base+"/.well-known/oauth-authorization-server", nil, nil)
+	assert.Equal(t, http.StatusUnauthorized, r.Code, "only the documents of this server are open; any other path still needs a credential")
 	assert.Zero(t, m.backend.Hits())
 
 	var meta struct {
 		Resource string   `json:"resource"`
 		Servers  []string `json:"authorization_servers"`
 	}
-	r := m.send(http.MethodGet, m.issuer()+"/protected-resource", nil, nil)
+	r = m.send(http.MethodGet, m.issuer()+"/protected-resource", nil, nil)
 	require.NoError(t, json.Unmarshal([]byte(r.Body), &meta))
 	assert.Equal(t, m.base+mcpPath, meta.Resource)
 	assert.Equal(t, []string{m.issuer()}, meta.Servers)

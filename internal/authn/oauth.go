@@ -4,16 +4,10 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"strings"
 
 	"github.com/ThisIsQasim/token-auth-proxy/internal/config"
 	"github.com/ThisIsQasim/token-auth-proxy/internal/oauth"
 )
-
-// isOAuthRoute reports whether path belongs to the OAuth server.
-func isOAuthRoute(path string) bool {
-	return path == config.OAuthPathPrefix || strings.HasPrefix(path, config.OAuthPathPrefix+"/")
-}
 
 // serveOAuth serves the OAuth server's routes, which sit in front of every
 // credential check: an MCP client starting a login has none yet, and the
