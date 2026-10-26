@@ -168,6 +168,33 @@ that hint: `/.well-known/oauth-protected-resource` (also with the MCP path appen
 for the issuer, `/.well-known/oauth-authorization-server/_tap/oauth` and
 `/.well-known/openid-configuration/_tap/oauth`.
 
+### Claude Code
+
+Register the client the way the configuration above does (`id: claude-code`, redirect URI
+`http://localhost/callback`; Claude Code redirects to `http://localhost:<port>/callback`, and
+a loopback URI matches on any port). Then add the server with the client ID, and log in:
+
+```sh
+claude mcp add-json os '{
+  "type": "http",
+  "url": "https://os.example.com/_plugins/_ml/mcp",
+  "oauth": {
+    "clientId": "claude-code",
+    "callbackPort": 8765
+  }
+}'
+claude mcp login os
+```
+
+The URL must be the `mcp_url`. Claude Code finds the authorization server itself from the
+`401`, so no metadata URL is needed. `/mcp` inside a session starts the same login. Over SSH
+or in a container, `claude mcp login os --no-browser` prints the URL to open; after signing
+in, paste the address the browser was sent to (`http://localhost:8765/callback?code=...`)
+back into the prompt. It needs a terminal.
+
+Claude Code keeps the refresh token and renews the access token on its own; you sign in
+again only after `refresh_absolute_lifetime`, or if you are removed with the denylist.
+
 ## With SAML as the login
 
 With the OAuth server on, a request that is not a browser navigation (anything but a `GET`
