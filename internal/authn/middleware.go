@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/crewjam/saml/samlsp"
+
 	"github.com/ThisIsQasim/token-auth-proxy/internal/config"
 	"github.com/ThisIsQasim/token-auth-proxy/internal/oauth"
 )
@@ -389,10 +391,22 @@ func authenticate(w http.ResponseWriter, r *http.Request, cfg *config.Config, re
 			rejectUnavailable(w, logger, r, reasonSAMLMetadataUnavailable, err, samlReg.retry)
 			return
 		}
-		enforceSAML(mw, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			allow(samlSessionPrincipal(r), r)
-		})).ServeHTTP(w, r)
-		return
+		if cfg.OAuthEnabled() && !nav {
+			// A request that is not a browser navigation (an MCP client probing the
+			// protected URL, say) cannot follow a redirect to the IdP, and needs the
+			// bearer challenge that tells it where to log in. A valid SAML session
+			// is still honored; without one the request falls through to the
+			// challenges below.
+			if s, err := mw.Session.GetSession(r); err == nil && s != nil {
+				allow(samlPrincipal(s), r.WithContext(samlsp.ContextWithSession(r.Context(), s)))
+				return
+			}
+		} else {
+			enforceSAML(mw, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				allow(samlSessionPrincipal(r), r)
+			})).ServeHTTP(w, r)
+			return
+		}
 	}
 	if loginMethodCount == 1 && nav {
 		// Only a JWT login source can be the one method here: SAML

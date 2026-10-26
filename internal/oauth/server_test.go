@@ -17,6 +17,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/spf13/pflag"
@@ -679,4 +680,73 @@ func TestFlow_OnlyTheCodeFlow(t *testing.T) {
 	assert.NotEqual(t, http.StatusOK, status, "%v", body)
 	status, body = e.token(url.Values{"grant_type": {"urn:ietf:params:oauth:grant-type:device_code"}, "client_id": {"claude-code"}, "device_code": {"x"}})
 	assert.NotEqual(t, http.StatusOK, status, "%v", body)
+}
+
+func TestCode_RefusedOnceTheSubjectIsDenied(t *testing.T) {
+	e := newEnv(t)
+	verifier, challenge := newPKCE()
+	code, _ := e.authorize(redirectURI, challenge)
+	require.NotEmpty(t, code)
+
+	e.denylist = []string{"alice"}
+	e.reload()
+	status, body := e.exchange(code, verifier)
+	assert.Equal(t, http.StatusBadRequest, status, "a login finished just before the subject was listed gets no tokens: %v", body)
+	assert.Equal(t, "invalid_grant", body["error"])
+}
+
+func TestLogin_OnlyGET(t *testing.T) {
+	e := newEnv(t)
+	calls := 0
+	e.respond = func(w http.ResponseWriter, _ *http.Request) { calls++; http.Error(w, "login ran", http.StatusTeapot) }
+
+	pending, err := e.reg.srv.Load().sealer.seal(kindPending, reqData{ClientID: "claude-code", Challenge: "c", Method: "S256", Exp: time.Now().Add(time.Minute).Unix()})
+	require.NoError(t, err)
+	u := e.issuer() + "/login?id=" + url.QueryEscape(pending)
+
+	for _, method := range []string{http.MethodHead, http.MethodPost, http.MethodPut, http.MethodDelete} {
+		r := e.do(method, u, nil)
+		assert.Equal(t, http.StatusMethodNotAllowed, r.StatusCode, method)
+	}
+	assert.Zero(t, calls, "nothing but a GET reaches the login")
+	assert.Equal(t, http.StatusTeapot, e.get(u).StatusCode)
+	assert.Equal(t, 1, calls)
+}
+
+func TestDocs_CrossOrigin(t *testing.T) {
+	e := newEnv(t)
+	for _, path := range []string{
+		e.issuer() + "/.well-known/openid-configuration", e.issuer() + "/protected-resource",
+		e.base + "/.well-known/oauth-protected-resource", e.base + "/.well-known/oauth-authorization-server" + config.OAuthPathPrefix,
+	} {
+		get := e.get(path)
+		assert.Equal(t, http.StatusOK, get.StatusCode, path)
+		assert.Equal(t, "*", get.Header.Get("Access-Control-Allow-Origin"), path)
+
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodOptions, path, nil)
+		require.NoError(t, err)
+		req.Header.Set("Origin", "https://inspector.example.com")
+		req.Header.Set("Access-Control-Request-Method", "GET")
+		req.Header.Set("Access-Control-Request-Headers", "mcp-protocol-version")
+		resp, err := e.cli.Do(req)
+		require.NoError(t, err)
+		_ = resp.Body.Close()
+		assert.Equal(t, http.StatusNoContent, resp.StatusCode, "the preflight is answered: %s", path)
+		assert.Equal(t, "*", resp.Header.Get("Access-Control-Allow-Origin"))
+		assert.Contains(t, resp.Header.Get("Access-Control-Allow-Methods"), "GET")
+		assert.Equal(t, "mcp-protocol-version", resp.Header.Get("Access-Control-Allow-Headers"))
+
+		head := e.do(http.MethodHead, path, nil)
+		assert.Equal(t, http.StatusOK, head.StatusCode)
+		assert.Empty(t, head.Body, "HEAD has no body")
+		assert.Equal(t, http.StatusMethodNotAllowed, e.do(http.MethodPost, path, url.Values{}).StatusCode, path)
+	}
+}
+
+func TestTruncate_KeepsValidUTF8(t *testing.T) {
+	assert.Equal(t, "abc", truncate("abc", 5))
+	assert.Equal(t, "abc", truncate("abcdef", 3))
+	got := truncate("ééé", 3) // each é is two bytes: the third byte would be half of the second
+	assert.Equal(t, "é", got)
+	assert.True(t, utf8.ValidString(got))
 }

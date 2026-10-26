@@ -125,6 +125,11 @@ func (s *storage) AuthRequestByCode(ctx context.Context, code string) (op.AuthRe
 	if !req.Done() {
 		return nil, errNotFound
 	}
+	// Someone put on the denylist between logging in and exchanging the code
+	// gets no tokens.
+	if s.denied(req.GetSubject()) {
+		return nil, errNotFound
+	}
 	return req, nil
 }
 

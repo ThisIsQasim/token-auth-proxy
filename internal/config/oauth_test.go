@@ -397,3 +397,20 @@ func TestOAuth_LocalSourceIsNotConfigurable(t *testing.T) {
 		}
 	}
 }
+
+func TestOAuth_DenylistMatchesIgnoringCase(t *testing.T) {
+	d := OAuthDenylist{Subjects: []string{"Former@Example.com", "abc123"}}
+	assert.True(t, d.Contains("former@example.com"), "an address listed in another case still cuts the person off")
+	assert.True(t, d.Contains("FORMER@EXAMPLE.COM"))
+	assert.True(t, d.Contains("abc123"))
+	assert.False(t, d.Contains("former@example.org"))
+	assert.False(t, d.Contains(""))
+}
+
+func TestOAuth_DenylistRejectsSurroundingWhitespace(t *testing.T) {
+	for _, bad := range []string{" former@example.com", "former@example.com ", "\tformer@example.com\n"} {
+		c := validOAuthConfig(t)
+		c.Inbound.OAuthServer.Denylist.Subjects = []string{bad}
+		assert.ErrorContains(t, c.Validate(), "whitespace", "%q would match nobody", bad)
+	}
+}

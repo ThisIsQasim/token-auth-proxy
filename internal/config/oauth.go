@@ -228,8 +228,12 @@ type OAuthDenylist struct {
 	Subjects []string `yaml:"subjects,omitempty"`
 }
 
-// Contains reports whether sub is denylisted.
-func (d OAuthDenylist) Contains(sub string) bool { return slices.Contains(d.Subjects, sub) }
+// Contains reports whether sub is denylisted. The comparison ignores case, so
+// an address listed in a different case from the one the IdP sends still cuts
+// the person off: a denylist errs towards refusing.
+func (d OAuthDenylist) Contains(sub string) bool {
+	return slices.ContainsFunc(d.Subjects, func(s string) bool { return strings.EqualFold(s, sub) })
+}
 
 // SealingKeyBytes returns the decoded sealing keys in configuration order.
 // Empty until Validate has succeeded.
@@ -323,6 +327,9 @@ func (o *OAuthServerConfig) validate() error {
 	for i, sub := range o.Denylist.Subjects {
 		if strings.TrimSpace(sub) == "" {
 			return fmt.Errorf("denylist.subjects[%d] must not be empty", i)
+		}
+		if sub != strings.TrimSpace(sub) {
+			return fmt.Errorf("denylist.subjects[%d] %q has leading or trailing whitespace, so it would match nobody", i, sub)
 		}
 	}
 	o.sealing = sealing

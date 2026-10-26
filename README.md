@@ -606,7 +606,7 @@ reference.
 | `refresh_absolute_lifetime` | `24h` | Counted from the login; refreshing never extends it (up to 365d) |
 | `sealing_keys` | required | List of base64 32-byte keys. The first seals; every key opens |
 | `clients` | required | List of `{id, redirect_uris}`; ids unique |
-| `denylist.subjects` | none | Subjects refused at login, at refresh and on every request |
+| `denylist.subjects` | none | Subjects (compared ignoring case; no surrounding whitespace) refused at login, at code exchange, at refresh and on every request |
 | `disabled` | `false` | Staged but off, like a source's `disabled` |
 
 `outbound.token`:
@@ -630,6 +630,11 @@ so ACL rules that name it keep the configuration valid.
 The server rebuilds itself when keys, clients or URLs change; lifetimes,
 claim names and the denylist are read live.
 
+With `inbound.auth.saml` as the login, a request that is not a browser navigation
+(a `GET` or `HEAD` accepting `text/html`) and has no valid SAML session is answered
+with the bearer challenge instead of a redirect to the IdP, so a client that probes the
+protected URL can find the login. Sessions are still honored and browsers still redirected.
+
 #### Login
 
 `/_tap/oauth/login` runs the proxy's own authentication (the same legs, in the
@@ -646,6 +651,7 @@ from the request. Before a code is issued:
   stolen access token cannot be turned into a new refresh token.
 
 A login request is valid for 10 minutes; the finished login for `code_ttl`.
+Only `GET` reaches the login route.
 
 #### Routes
 
@@ -667,11 +673,17 @@ with the `mcp_url` path appended), and for the issuer
 `/.well-known/openid-configuration/_tap/oauth`. Every other path under
 `/_tap/oauth`, including introspection, revocation, userinfo and device
 authorization, answers `404`.
+The two documents answer cross-origin requests (`Access-Control-Allow-Origin: *`, and
+the preflight), for clients that run in a browser.
 
 #### Limits
 
 - An authorization code is not single use; it is bound to the PKCE challenge and
   expires after `code_ttl`.
+- A refresh token is not single use. Each refresh issues a new one, but the old one
+  stays valid until `refresh_absolute_lifetime` is over and reuse is not detected, so a
+  stolen refresh token lasts that long. Keep the lifetime short; the denylist cuts a
+  person off at once.
 - There is no per-token revocation. Cut a person off with the denylist (takes
   effect on their next request), or sign everyone out by replacing the sealing
   keys.

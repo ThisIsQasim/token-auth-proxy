@@ -264,14 +264,14 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	if doc, ok := s.wellKnown[req.URL.Path]; ok {
-		serveJSON(w, doc)
+		serveDoc(w, req, doc)
 		return
 	}
 	switch rel := strings.TrimPrefix(req.URL.Path, config.OAuthPathPrefix); {
 	case rel == "/protected-resource":
-		serveJSON(w, s.metadata)
+		serveDoc(w, req, s.metadata)
 	case rel == "/.well-known/openid-configuration":
-		serveJSON(w, s.discovery)
+		serveDoc(w, req, s.discovery)
 	case routes[rel]:
 		s.handler.ServeHTTP(w, req)
 	default:
@@ -279,10 +279,29 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
-func serveJSON(w http.ResponseWriter, doc []byte) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "public, max-age=300")
-	_, _ = w.Write(doc)
+// serveDoc serves one of the public metadata documents. They are fetched by
+// clients that may run in a browser, so they answer cross-origin requests
+// and the preflight that precedes them.
+func serveDoc(w http.ResponseWriter, req *http.Request, doc []byte) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	switch req.Method {
+	case http.MethodOptions:
+		w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+		if h := req.Header.Get("Access-Control-Request-Headers"); h != "" {
+			w.Header().Set("Access-Control-Allow-Headers", h)
+		}
+		w.Header().Set("Access-Control-Max-Age", "3600")
+		w.WriteHeader(http.StatusNoContent)
+	case http.MethodGet, http.MethodHead:
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "public, max-age=300")
+		if req.Method == http.MethodGet {
+			_, _ = w.Write(doc)
+		}
+	default:
+		w.Header().Set("Allow", "GET, HEAD, OPTIONS")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 // discoveryDocument is the provider's own, cut down to what this server does:
@@ -347,8 +366,10 @@ func (r *Registry) ServeLogin(w http.ResponseWriter, req *http.Request, authenti
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 
-	if req.Method != http.MethodGet && req.Method != http.MethodHead {
-		w.Header().Set("Allow", "GET, HEAD")
+	// GET only: a HEAD (a link prefetcher, a health check) would run the login and
+	// hand-off for nobody.
+	if req.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -392,9 +413,10 @@ func (r *Registry) ServeLogin(w http.ResponseWriter, req *http.Request, authenti
 	})
 }
 
+// truncate cuts s to at most n bytes, without leaving half a character at the end.
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	return s[:n]
+	return strings.ToValidUTF8(s[:n], "")
 }

@@ -42,6 +42,7 @@ type oauthMW struct {
 	oauth   *oauth.Registry
 	cli     *http.Client
 
+	saml     *TestSAMLIDP // when set, SAML is the way to log in instead of Basic
 	signKey  *ecdsa.PrivateKey
 	signPEM  string
 	sealKey  string
@@ -49,9 +50,17 @@ type oauthMW struct {
 	disabled bool
 }
 
-func newOAuthMW(t *testing.T) *oauthMW {
+func newOAuthMW(t *testing.T) *oauthMW { return newOAuthMWWith(t, false) }
+
+// newOAuthMWWith builds the harness, with SAML (a real test IdP) as the login
+// when withSAML is set and Basic otherwise.
+func newOAuthMWWith(t *testing.T, withSAML bool) *oauthMW {
 	t.Helper()
 	m := &oauthMW{t: t, backend: &backendStub{}}
+	if withSAML {
+		t.Setenv("OAUTH_MW_SAML_KEY", validSAMLSessionKeyForTest)
+		m.saml = NewTestSAMLIDP(t)
+	}
 
 	m.signKey, _ = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	der, err := x509.MarshalPKCS8PrivateKey(m.signKey)
@@ -65,6 +74,10 @@ func newOAuthMW(t *testing.T) *oauthMW {
 	m.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { handler.ServeHTTP(w, r) }))
 	t.Cleanup(m.srv.Close)
 	m.base = m.srv.URL
+	if m.saml != nil {
+		m.saml.RegisterSP(m.base+"/saml/metadata", m.base+"/saml/acs")
+		m.saml.SetUser("carol@example.com", map[string][]string{"groups": {"os-mcp-readers"}, "email": {"carol@example.com"}})
+	}
 	m.cli = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 
 	m.source = newFakeSource(t, m.config())
@@ -88,11 +101,18 @@ func (m *oauthMW) config() *config.Config {
 		require.NoError(m.t, err)
 		return string(b)
 	}
-	args := []string{
-		"--target", "http://opensearch:9200",
-		"--inbound-auth-basic-json", mustJSON(map[string]any{"users": []map[string]string{
-			{"username": "alice", "password_hash": hash}, {"username": "bob", "password_hash": hash},
-		}}),
+	login := []string{"--inbound-auth-basic-json", mustJSON(map[string]any{"users": []map[string]string{
+		{"username": "alice", "password_hash": hash}, {"username": "bob", "password_hash": hash},
+	}})}
+	if m.saml != nil {
+		login = []string{"--inbound-auth-saml-json", mustJSON(map[string]any{
+			"issuer": m.saml.Issuer, "idp_metadata_url": m.saml.MetadataURL, "sp_base_url": m.base,
+			"sp_entity_id": m.base + "/saml/metadata", "acs_path": "/saml/acs", "session_cookie": "saml_session",
+			"session_signing_key_env": "OAUTH_MW_SAML_KEY", "session_duration": "1h",
+		})}
+	}
+	args := append([]string{"--target", "http://opensearch:9200"}, login...)
+	args = append(args,
 		"--inbound-oauth-server-json", mustJSON(map[string]any{
 			"disabled": m.disabled, "sp_base_url": m.base, "mcp_url": m.base + mcpPath, "sealing_keys": []string{m.sealKey},
 			"clients":  []map[string]any{{"id": "claude-code", "redirect_uris": []string{"http://localhost/callback"}}},
@@ -105,7 +125,7 @@ func (m *oauthMW) config() *config.Config {
 			{"principals": []map[string]any{{"mode": "jwt", "source": config.OAuthSourceName, "claims": map[string]string{"groups": "os-mcp-readers"}}}, "paths": []string{mcpPath}},
 			{"principals": []map[string]any{{"mode": "jwt", "source": config.OAuthSourceName, "claims": map[string]string{"sub": "alice"}}}, "paths": []string{mcpPath}},
 		}),
-	}
+	)
 	fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
 	config.RegisterFlags(fs)
 	require.NoError(m.t, fs.Parse(args))
@@ -119,9 +139,20 @@ func (m *oauthMW) issuer() string { return m.base + config.OAuthPathPrefix }
 
 // send makes a request, reads the reply and closes the body.
 type mwReply struct {
-	Code   int
-	Header http.Header
-	Body   string
+	Code    int
+	Header  http.Header
+	Body    string
+	Cookies []*http.Cookie
+}
+
+// cookie returns the cookie set by the reply whose name starts with prefix.
+func (r *mwReply) cookie(prefix string) *http.Cookie {
+	for _, c := range r.Cookies {
+		if strings.HasPrefix(c.Name, prefix) {
+			return c
+		}
+	}
+	return nil
 }
 
 func (m *oauthMW) send(method, target string, header map[string]string, form url.Values) *mwReply {
@@ -143,7 +174,7 @@ func (m *oauthMW) send(method, target string, header map[string]string, form url
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(resp.Body)
 	require.NoError(m.t, err)
-	return &mwReply{Code: resp.StatusCode, Header: resp.Header, Body: string(raw)}
+	return &mwReply{Code: resp.StatusCode, Header: resp.Header, Body: string(raw), Cookies: resp.Cookies()}
 }
 
 func basicAuth(user string) map[string]string {
@@ -395,4 +426,79 @@ func TestOAuthMW_Disabled(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, r.Code, "and its tokens are not accepted")
 	assert.Zero(t, m.backend.Hits())
 	assert.NotContains(t, strings.Join(r.Header.Values("WWW-Authenticate"), ","), "resource_metadata")
+}
+
+func cookieHeader(c *http.Cookie) map[string]string {
+	return map[string]string{"Cookie": c.Name + "=" + c.Value}
+}
+
+// With SAML as the way to log in, an MCP client probing the protected URL must
+// still be told where to log in. A redirect to the IdP is no use to it.
+func TestOAuthMW_SAMLLogin(t *testing.T) {
+	m := newOAuthMWWith(t, true)
+	html := map[string]string{"Accept": "text/html"}
+	metadata := `resource_metadata="` + m.issuer() + `/protected-resource"`
+
+	t.Run("a client without a session gets the bearer challenge", func(t *testing.T) {
+		r := m.send(http.MethodPost, m.base+mcpPath, nil, nil)
+		assert.Equal(t, http.StatusUnauthorized, r.Code)
+		assert.Contains(t, r.Header.Values("WWW-Authenticate"), "Bearer "+metadata)
+		assert.Empty(t, r.Header.Get("Location"), "no redirect to the IdP")
+		assert.Zero(t, m.backend.Hits())
+	})
+	t.Run("a browser is still sent to the IdP", func(t *testing.T) {
+		r := m.send(http.MethodGet, m.base+mcpPath, html, nil)
+		assert.Equal(t, http.StatusFound, r.Code)
+		assert.Contains(t, r.Header.Get("Location"), "SAMLRequest=")
+	})
+
+	t.Run("logging in through SAML gives a token with the person's groups", func(t *testing.T) {
+		verifier, challenge := pkcePair()
+		r := m.send(http.MethodGet, m.authorizeURL(challenge), nil, nil)
+		require.Equal(t, http.StatusFound, r.Code, r.Body)
+		loginURL := r.Header.Get("Location")
+
+		// The browser follows the login to the IdP, which authenticates the person.
+		r = m.send(http.MethodGet, loginURL, html, nil)
+		require.Equal(t, http.StatusFound, r.Code)
+		idpURL := r.Header.Get("Location")
+		tracker := r.cookie("saml_")
+		require.NotNil(t, tracker)
+		samlResponse := driveIDPLogin(t, idpURL)
+
+		acs := m.send(http.MethodPost, m.base+"/saml/acs", cookieHeader(tracker), url.Values{
+			"SAMLResponse": {samlResponse}, "RelayState": {relayStateOf(t, idpURL)},
+		})
+		require.Equal(t, http.StatusFound, acs.Code, acs.Body)
+		session := acs.cookie("saml_session")
+		require.NotNil(t, session, "the ACS callback starts a session")
+		assert.Contains(t, acs.Header.Get("Location"), config.OAuthPathPrefix+"/login?id=", "and returns to the login request")
+
+		// Back at the login with a session: the hand-off completes.
+		r = m.send(http.MethodGet, m.base+acs.Header.Get("Location"), cookieHeader(session), nil)
+		require.Equal(t, http.StatusFound, r.Code, r.Body)
+		r = m.send(http.MethodGet, r.Header.Get("Location"), nil, nil)
+		require.Equal(t, http.StatusFound, r.Code, r.Body)
+		require.True(t, strings.HasPrefix(r.Header.Get("Location"), oauthLoopback), r.Header.Get("Location"))
+		cb, err := url.Parse(r.Header.Get("Location"))
+		require.NoError(t, err)
+
+		status, tok := m.exchange(cb.Query().Get("code"), verifier)
+		require.Equal(t, http.StatusOK, status, "%v", tok)
+		access := tok["access_token"].(string)
+
+		claims := jwt.MapClaims{}
+		_, _, err = jwt.NewParser().ParseUnverified(access, claims)
+		require.NoError(t, err)
+		assert.Equal(t, "carol@example.com", claims["sub"], "the NameID")
+		assert.Equal(t, "carol@example.com", claims["email"])
+		assert.Equal(t, []any{"os-mcp-readers"}, claims["groups"], "the SAML attribute, as the groups claim")
+
+		r = m.send(http.MethodPost, m.base+mcpPath, bearer(access), nil)
+		assert.Equal(t, http.StatusOK, r.Code, "and the group rule in the ACL lets the token in")
+
+		// A client that does hold a valid SAML session cookie is still recognized.
+		r = m.send(http.MethodPost, m.base+mcpPath, cookieHeader(session), nil)
+		assert.Equal(t, http.StatusForbidden, r.Code, "authenticated, then refused by the ACL, which only names the token's source")
+	})
 }

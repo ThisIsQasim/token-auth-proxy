@@ -75,7 +75,7 @@ in must be configured.
 | `refresh_absolute_lifetime` | `24h` | How long after the login a refresh token can renew the session. Refreshing never extends it |
 | `sealing_keys` | required | Base64 32-byte keys. The first seals; every key opens, which is how you rotate |
 | `clients` | required | Public clients (PKCE required, no secret). `redirect_uris` are exact `https` URLs, or `http` loopback URLs (`localhost`, `127.0.0.1`, `[::1]`) that match on any port |
-| `denylist.subjects` | none | Subjects that are refused at login, refresh and on every request |
+| `denylist.subjects` | none | Subjects (the `sub` of the login, compared ignoring case, no surrounding whitespace) that are refused at login, at code exchange, at refresh and on every request |
 | `disabled` | `false` | Takes the server out of rotation without deleting its configuration |
 
 **`outbound.token`**
@@ -92,9 +92,9 @@ login whose roles arrive in an attribute called `Roles`, set `claims.groups: Rol
 
 ## Control who gets a token
 
-The ACL decides this twice. It is checked at login for the token the person would get,
-so someone who could never use it is refused then, and again on every request the
-token makes. Name the proxy's own tokens as `mode: jwt, source: tap-oauth`, and match
+The ACL decides this twice. It is checked at login for the token the person would get
+(as a `POST` to the `mcp_url` path), so someone who could never use it is refused then,
+and again on every request the token makes. Name the proxy's own tokens as `mode: jwt, source: tap-oauth`, and match
 the claims above:
 
 ```yaml
@@ -168,6 +168,14 @@ that hint: `/.well-known/oauth-protected-resource` (also with the MCP path appen
 for the issuer, `/.well-known/oauth-authorization-server/_tap/oauth` and
 `/.well-known/openid-configuration/_tap/oauth`.
 
+## With SAML as the login
+
+With the OAuth server on, a request that is not a browser navigation (anything but a `GET`
+or `HEAD` that accepts `text/html`) is no longer redirected to the IdP when it has no SAML
+session. It gets the `401` with the `resource_metadata` challenge instead, which is what an
+MCP client needs to find the login. A valid SAML session cookie is still accepted, and a
+browser is still sent to the IdP.
+
 ## Operate it
 
 **Rotate the signing key.** Put the new key first and keep the old one listed until the
@@ -191,6 +199,10 @@ snapshot from the login, and a session ends `refresh_absolute_lifetime` after it
   `access_token_ttl` short.
 - An authorization code is not single use. It lasts `code_ttl` and is useless without the
   PKCE verifier only the client has.
+- A refresh token is not single use either. Each refresh issues a new one, but the old one
+  keeps working until `refresh_absolute_lifetime` is over, and a reused token is not detected.
+  A stolen refresh token therefore lasts that long: keep the lifetime as short as people can
+  bear, and use the denylist to cut someone off.
 - There is no per-token revocation; the denylist works by subject. Replacing every
   sealing key signs everyone out.
 - A token the server issued is not accepted as a login, so a stolen access token cannot
