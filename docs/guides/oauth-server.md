@@ -200,6 +200,28 @@ back into the prompt. It needs a terminal.
 Claude Code keeps the refresh token and renews the access token on its own; you sign in
 again only after `refresh_absolute_lifetime`, or if you are removed with the denylist.
 
+### claude.ai, Claude Desktop and Claude mobile
+
+These apps share one connector and one callback URL, so one client covers all of them:
+
+```yaml
+clients:
+  - id: claude-ai
+    redirect_uris:
+      - https://claude.ai/api/mcp/auth_callback
+```
+
+Add the connector in **Customize > Connectors** (on a Team or Enterprise plan, an Owner adds it in
+**Organization settings > Connectors**, and members then connect with their own account). Enter the
+`mcp_url` as the server URL and, under the OAuth client setting, choose **Use your own OAuth client**:
+client ID `claude-ai`, secret left blank, since it is a public client that relies on PKCE. The server
+does not offer Dynamic Client Registration or Client ID Metadata Documents, so the other two options
+(**Register automatically** and **Use Claude's published identity**) will not work. Claude cannot
+change a connector's authentication settings afterwards; remove it and add it again.
+
+The server has to be reachable from Anthropic's network (`160.79.104.0/21`), including its discovery
+documents, so do not put an IP allowlist or a bot filter in front of it that blocks that range.
+
 ## With SAML as the login
 
 With the OAuth server on, a request that is not a browser navigation (anything but a `GET`

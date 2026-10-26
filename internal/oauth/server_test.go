@@ -112,7 +112,10 @@ func (e *env) config() *config.Config {
 	}
 	srvJSON, err := json.Marshal(map[string]any{
 		"disabled": e.disabled, "sp_base_url": e.base, "mcp_url": e.base + "/mcp", "sealing_keys": e.sealing,
-		"clients":  []map[string]any{{"id": "claude-code", "redirect_uris": []string{"http://localhost/callback"}}},
+		"clients": []map[string]any{
+			{"id": "claude-code", "redirect_uris": []string{"http://localhost/callback"}},
+			{"id": "claude-ai", "redirect_uris": []string{"https://claude.ai/api/mcp/auth_callback"}},
+		},
 		"denylist": map[string]any{"subjects": e.denylist},
 	})
 	require.NoError(e.t, err)
@@ -182,8 +185,12 @@ func (e *env) do(method, u string, form url.Values) *reply {
 func (e *env) get(u string) *reply { return e.do(http.MethodGet, u, nil) }
 
 func (e *env) authorizeURL(redirect, challenge string) string {
+	return e.authorizeURLFor("claude-code", redirect, challenge)
+}
+
+func (e *env) authorizeURLFor(clientID, redirect, challenge string) string {
 	return e.issuer() + "/authorize?" + url.Values{
-		"client_id": {"claude-code"}, "response_type": {"code"}, "redirect_uri": {redirect},
+		"client_id": {clientID}, "response_type": {"code"}, "redirect_uri": {redirect},
 		"scope": {"openid offline_access groups"}, "state": {"st123"}, "nonce": {"n1"},
 		"code_challenge": {challenge}, "code_challenge_method": {"S256"},
 	}.Encode()
@@ -193,7 +200,12 @@ func (e *env) authorizeURL(redirect, challenge string) string {
 // and returns the code, or the last response when the flow stops short.
 func (e *env) authorize(redirect, challenge string) (code string, last *reply) {
 	e.t.Helper()
-	next := e.authorizeURL(redirect, challenge)
+	return e.authorizeAs("claude-code", redirect, challenge)
+}
+
+func (e *env) authorizeAs(clientID, redirect, challenge string) (code string, last *reply) {
+	e.t.Helper()
+	next := e.authorizeURLFor(clientID, redirect, challenge)
 	for range 6 {
 		resp := e.get(next)
 		loc := resp.Header.Get("Location")
@@ -749,4 +761,43 @@ func TestTruncate_KeepsValidUTF8(t *testing.T) {
 	got := truncate("ééé", 3) // each é is two bytes: the third byte would be half of the second
 	assert.Equal(t, "é", got)
 	assert.True(t, utf8.ValidString(got))
+}
+
+// claude.ai, Claude Desktop, mobile and Cowork connect as one public client with a
+// fixed https callback, unlike Claude Code's loopback one.
+func TestFlow_HostedClient(t *testing.T) {
+	e := newEnv(t)
+	const hosted = "https://claude.ai/api/mcp/auth_callback"
+	verifier, challenge := newPKCE()
+
+	code, last := e.authorizeAs("claude-ai", hosted, challenge)
+	require.NotEmpty(t, code, "status %d", last.StatusCode)
+
+	status, tok := e.token(url.Values{
+		"grant_type": {"authorization_code"}, "code": {code}, "redirect_uri": {hosted},
+		"client_id": {"claude-ai"}, "code_verifier": {verifier},
+	})
+	require.Equal(t, http.StatusOK, status, "%v", tok)
+	_, claims := e.verify(tok["access_token"].(string))
+	assert.Equal(t, "alice", claims["sub"])
+
+	status, again := e.token(url.Values{"grant_type": {"refresh_token"}, "refresh_token": {tok["refresh_token"].(string)}, "client_id": {"claude-ai"}})
+	assert.Equal(t, http.StatusOK, status, "the hosted client refreshes too: %v", again)
+
+	t.Run("only the registered callback", func(t *testing.T) {
+		for _, redirect := range []string{
+			"https://claude.ai/api/mcp/auth_callback/", "https://claude.ai/api/mcp/other", "https://claude.com/api/mcp/auth_callback",
+			"http://claude.ai/api/mcp/auth_callback", "https://evil.example.com/api/mcp/auth_callback",
+		} {
+			code, last := e.authorizeAs("claude-ai", redirect, challenge)
+			assert.Empty(t, code, redirect)
+			assert.Equal(t, http.StatusBadRequest, last.StatusCode, redirect)
+		}
+	})
+	t.Run("the clients do not share callbacks", func(t *testing.T) {
+		code, _ := e.authorizeAs("claude-ai", redirectURI, challenge)
+		assert.Empty(t, code, "the loopback callback is claude-code's, not claude-ai's")
+		code, _ = e.authorizeAs("claude-code", hosted, challenge)
+		assert.Empty(t, code, "and the hosted callback is not claude-code's")
+	})
 }
