@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/ThisIsQasim/token-auth-proxy/internal/config"
+	"github.com/ThisIsQasim/token-auth-proxy/internal/oauth"
 )
 
 // maxLoggedIssuerLen bounds how much of a token's (attacker-controlled,
@@ -63,7 +64,7 @@ func enforceJWT(w http.ResponseWriter, r *http.Request, cfg *config.Config, reg 
 		if stale(reasonMalformedToken) {
 			return jwtStale, nil
 		}
-		reject(w, logger, r, reasonMalformedToken)
+		reject(w, logger, r, bearerInvalidChallenge(cfg), reasonMalformedToken)
 		return jwtRejected, nil
 	}
 	loggedIss := truncate(iss, maxLoggedIssuerLen)
@@ -73,7 +74,7 @@ func enforceJWT(w http.ResponseWriter, r *http.Request, cfg *config.Config, reg 
 		if stale(reasonUnknownIssuer) {
 			return jwtStale, nil
 		}
-		reject(w, logger, r, reasonUnknownIssuer, "issuer", loggedIss)
+		reject(w, logger, r, bearerInvalidChallenge(cfg), reasonUnknownIssuer, "issuer", loggedIss)
 		return jwtRejected, nil
 	}
 
@@ -117,6 +118,14 @@ func enforceJWT(w http.ResponseWriter, r *http.Request, cfg *config.Config, reg 
 			}
 			continue
 		}
+		// A person taken off the denylist loses a token that is still valid.
+		if src.Local && reg.deniedLocalSubject(claims) {
+			if !haveKeysUnavailable {
+				reportReason = reasonSubjectDenied
+				reportArgs = []any{"source", src.Name}
+			}
+			continue
+		}
 
 		return jwtAllowed, jwtPrincipal(src, claims)
 	}
@@ -132,7 +141,7 @@ func enforceJWT(w http.ResponseWriter, r *http.Request, cfg *config.Config, reg 
 		rejectUnavailable(w, logger, r, reasonKeysUnavailable, keysErr, reg.retry)
 		return jwtRejected, nil
 	}
-	reject(w, logger, r, reportReason, reportArgs...)
+	reject(w, logger, r, bearerInvalidChallenge(cfg), reportReason, reportArgs...)
 	return jwtRejected, nil
 }
 
@@ -192,7 +201,7 @@ func enforceJWT(w http.ResponseWriter, r *http.Request, cfg *config.Config, reg 
 // HTML login page is useless and loses the request body. There's no
 // content negotiation (e.g. sniffing Accept to choose 401 vs 302) in
 // this build — see the README's SAML limitations section.
-func NewMiddleware(source ConfigSource, jwtReg *Registry, samlReg *SAMLRegistry, basicReg *BasicRegistry, loginReg *LoginRegistry, logger *slog.Logger) func(http.Handler) http.Handler {
+func NewMiddleware(source ConfigSource, jwtReg *Registry, samlReg *SAMLRegistry, basicReg *BasicRegistry, loginReg *LoginRegistry, oauthReg *oauth.Registry, logger *slog.Logger) func(http.Handler) http.Handler {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -206,6 +215,9 @@ func NewMiddleware(source ConfigSource, jwtReg *Registry, samlReg *SAMLRegistry,
 			jwtReg.Reconcile(cfg)
 			samlReg.Reconcile(cfg)
 			basicReg.Reconcile(cfg)
+			if oauthReg != nil {
+				oauthReg.Reconcile(cfg)
+			}
 
 			samlEnabled := cfg.Inbound.Auth.SAMLEnabled()
 			loginMethodCount := cfg.Inbound.Auth.LoginMethodCount()
@@ -241,6 +253,10 @@ func NewMiddleware(source ConfigSource, jwtReg *Registry, samlReg *SAMLRegistry,
 			}
 			if loginMethodCount > 0 && isLogoutRoute(r.URL.Path) {
 				loginReg.serveLogout(w, r, cfg, logger)
+				return
+			}
+			if oauthReg != nil && cfg.OAuthEnabled() && isOAuthRoute(r.URL.Path) {
+				serveOAuth(w, r, cfg, regs, oauthReg, logger)
 				return
 			}
 
@@ -338,7 +354,7 @@ func authenticate(w http.ResponseWriter, r *http.Request, cfg *config.Config, re
 		case jwtStale:
 			// Unreachable: the stale cookie was dropped above, so
 			// enforceJWT cannot report it again.
-			reject(w, logger, r, reasonInvalidClaims)
+			reject(w, logger, r, bearerInvalidChallenge(cfg), reasonInvalidClaims)
 			return
 		case jwtNoCredential:
 			// Fall through to step 4/5 below.
@@ -395,7 +411,7 @@ func authenticate(w http.ResponseWriter, r *http.Request, cfg *config.Config, re
 			challenges = append(challenges, basicChallenge(basicSrc.Realm))
 		}
 		if jwtEnabled {
-			challenges = append(challenges, bearerChallenge)
+			challenges = append(challenges, bearerChallenge(cfg))
 		}
 		rejectChallenges(w, logger, r, reasonNoCredential, challenges)
 		return
@@ -453,11 +469,23 @@ func enforceBasic(w http.ResponseWriter, r *http.Request, src config.BasicSource
 // Challenge values for the WWW-Authenticate header. Per RFC 6750 §3,
 // the error parameter only belongs on a challenge answering a request
 // that actually presented a credential; a request that carried none has
-// no error to report, just a scheme on offer.
-const (
-	bearerChallenge        = "Bearer"
-	bearerInvalidChallenge = `Bearer error="invalid_token"` // #nosec G101 -- an RFC 6750 challenge string, not a credential value
-)
+// no error to report, just a scheme on offer. With the OAuth server on,
+// both name where its protected resource metadata is (RFC 9728), which is
+// how an MCP client finds out where to log in.
+func bearerChallenge(cfg *config.Config) string {
+	if cfg.OAuthEnabled() {
+		return fmt.Sprintf("Bearer resource_metadata=%q", cfg.Inbound.OAuthServer.ProtectedResourceMetadataURL())
+	}
+	return "Bearer"
+}
+
+func bearerInvalidChallenge(cfg *config.Config) string {
+	c := `Bearer error="invalid_token"` // #nosec G101 -- an RFC 6750 challenge string, not a credential value
+	if cfg.OAuthEnabled() {
+		c += fmt.Sprintf(", resource_metadata=%q", cfg.Inbound.OAuthServer.ProtectedResourceMetadataURL())
+	}
+	return c
+}
 
 // basicChallenge builds the WWW-Authenticate value for the Basic leg.
 // realm is safe to quote directly: config.validateRealm has already
@@ -471,8 +499,8 @@ func basicChallenge(realm string) string {
 // reject writes a 401 for a bearer token that was presented and failed
 // — the JWT leg's only rejection shape, since its no-credential case is
 // handled by NewMiddleware's combined challenge instead.
-func reject(w http.ResponseWriter, logger *slog.Logger, r *http.Request, why reason, extra ...any) {
-	rejectChallenges(w, logger, r, why, []string{bearerInvalidChallenge}, extra...)
+func reject(w http.ResponseWriter, logger *slog.Logger, r *http.Request, challenge string, why reason, extra ...any) {
+	rejectChallenges(w, logger, r, why, []string{challenge}, extra...)
 }
 
 // rejectChallenges writes a minimal 401 response — never detailing why,

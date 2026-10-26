@@ -42,6 +42,9 @@ const (
 	reasonBadAudience   reason = "bad_audience"
 	reasonBadIssuer     reason = "issuer_mismatch"
 	reasonInvalidClaims reason = "invalid_claims"
+	// reasonSubjectDenied covers a valid token of the proxy's own OAuth server
+	// whose subject is on the denylist.
+	reasonSubjectDenied reason = "subject_denied"
 
 	// reasonBadCredential covers a Basic credential that didn't verify.
 	// It deliberately does NOT distinguish "no such user" from "wrong

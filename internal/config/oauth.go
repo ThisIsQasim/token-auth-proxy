@@ -419,9 +419,27 @@ func (c *Config) validateOAuth() error {
 	if auth.SAML != nil && underOAuthPrefix(auth.SAML.ACSPath) {
 		return fmt.Errorf("inbound.auth.saml: acs_path %q is served by inbound.oauth_server", auth.SAML.ACSPath)
 	}
+	if !srv.Disabled && auth.LoginMethodCount() == 0 {
+		return fmt.Errorf("inbound.oauth_server needs a way for people to log in: configure inbound.auth.saml, an inbound.auth.jwt source with login, or inbound.auth.basic")
+	}
 	return nil
 }
 
 func underOAuthPrefix(path string) bool {
 	return path == OAuthPathPrefix || strings.HasPrefix(path, OAuthPathPrefix+"/")
+}
+
+// oauthSource is the JWT source for the tokens the OAuth server issues, so
+// they go through the same leg, claim matching and ACLs as any other bearer
+// token. Only valid with the server enabled.
+func (c *Config) oauthSource() JWTSource {
+	return JWTSource{
+		Name:        OAuthSourceName,
+		Issuer:      c.Inbound.OAuthServer.Issuer(),
+		Audiences:   []string{c.Outbound.Token.Audience},
+		Credentials: []CredentialLocation{{Location: "header", Name: "Authorization", Prefix: "Bearer "}},
+		Algorithms:  []string{"ES256"},
+		ClockSkew:   defaultClockSkew,
+		Local:       true,
+	}
 }

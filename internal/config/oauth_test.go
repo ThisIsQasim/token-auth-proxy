@@ -40,15 +40,17 @@ func validOAuthConfig(t *testing.T) *Config {
 	t.Helper()
 	c := &Config{
 		Target: "http://opensearch:9200",
-		Inbound: InboundConfig{OAuthServer: &OAuthServerConfig{
-			SPBaseURL:   "https://os.example.com",
-			MCPURL:      "https://os.example.com/_plugins/_ml/mcp",
-			SealingKeys: []string{testSealingKey(t)},
-			Clients: []OAuthClient{
-				{ID: "claude-code", RedirectURIs: []string{"http://localhost/callback"}},
-				{ID: "claude-ai", RedirectURIs: []string{"https://claude.ai/api/mcp/auth_callback"}},
-			},
-		}},
+		Inbound: InboundConfig{
+			Auth: InboundAuthConfig{JWT: []JWTSource{validLoginSource()}},
+			OAuthServer: &OAuthServerConfig{
+				SPBaseURL:   "https://os.example.com",
+				MCPURL:      "https://os.example.com/_plugins/_ml/mcp",
+				SealingKeys: []string{testSealingKey(t)},
+				Clients: []OAuthClient{
+					{ID: "claude-code", RedirectURIs: []string{"http://localhost/callback"}},
+					{ID: "claude-ai", RedirectURIs: []string{"https://claude.ai/api/mcp/auth_callback"}},
+				},
+			}},
 		Outbound: OutboundConfig{Token: &TokenConfig{
 			SigningKeys: []SigningKey{{KID: "k1", PrivateKey: testSigningKeyPEM(t)}},
 		}},
@@ -226,7 +228,10 @@ func TestOAuth_ACLSource(t *testing.T) {
 	require.NoError(t, c.Validate(), "the proxy's own tokens can be named in an ACL rule")
 
 	c.Inbound.OAuthServer.Disabled = true
-	assert.ErrorContains(t, c.Validate(), "does not name a configured", "but not once the server is off")
+	assert.NoError(t, c.Validate(), "and stays valid while the server is switched off, so switching it off cannot fail a reload")
+
+	c.Inbound.OAuthServer, c.Outbound.Token = nil, nil
+	assert.ErrorContains(t, c.Validate(), "does not name a configured", "but there is no such source once the server is gone")
 }
 
 func TestOAuth_DenylistContains(t *testing.T) {
@@ -239,6 +244,13 @@ func TestOAuth_DenylistContains(t *testing.T) {
 func oauthYAML(srvKey, sealPath, keyPath string) string {
 	return fmt.Sprintf(`target: http://opensearch:9200
 inbound:
+  auth:
+    jwt:
+      - issuer: https://idp.example.com
+        oidc_discovery_url: https://idp.example.com/.well-known/openid-configuration
+        login:
+          client_id: proxy
+          sp_base_url: https://os.example.com
   oauth_server:
     sp_base_url: https://os.example.com
     mcp_url: https://os.example.com/_plugins/_ml/mcp
@@ -305,4 +317,83 @@ func TestOAuth_JSONOverrides(t *testing.T) {
 		assert.Equal(t, 5*time.Minute, cfg.Outbound.Token.AccessTokenTTL)
 		assert.Equal(t, "env", cfg.Outbound.Token.Keys()[0].KID)
 	})
+}
+
+func TestOAuth_DerivedJWTSource(t *testing.T) {
+	c := validOAuthConfig(t)
+	require.NoError(t, c.Validate())
+
+	require.Len(t, c.Inbound.Auth.JWT, 2, "the login source plus the derived one")
+	src := c.Inbound.Auth.JWT[1]
+	assert.True(t, src.Local)
+	assert.Equal(t, OAuthSourceName, src.Name)
+	assert.Equal(t, "https://os.example.com/_tap/oauth", src.Issuer)
+	assert.Equal(t, []string{"https://os.example.com/_plugins/_ml/mcp"}, src.Audiences)
+	assert.Equal(t, []string{"ES256"}, src.Algorithms)
+	assert.Equal(t, []CredentialLocation{{Location: "header", Name: "Authorization", Prefix: "Bearer "}}, src.Credentials)
+	assert.Empty(t, src.JWKSURL, "its keys are in-process")
+
+	found := c.Inbound.Auth.JWTSourcesByIssuer("https://os.example.com/_tap/oauth")
+	require.Len(t, found, 1, "tokens are routed to it by issuer like any other")
+	assert.Equal(t, OAuthSourceName, found[0].Name)
+}
+
+func TestOAuth_NoDerivedSourceWhenOff(t *testing.T) {
+	c := validOAuthConfig(t)
+	c.Inbound.OAuthServer.Disabled = true
+	require.NoError(t, c.Validate())
+	require.Len(t, c.Inbound.Auth.JWT, 2)
+	assert.True(t, c.Inbound.Auth.JWT[1].Disabled, "a disabled server's source is there but takes no part")
+	assert.Empty(t, c.Inbound.Auth.JWTSourcesByIssuer(c.Inbound.OAuthServer.Issuer()), "and no token is routed to it")
+
+	plain := &Config{Target: "http://opensearch:9200"}
+	plain.applyDefaults()
+	require.NoError(t, plain.Validate())
+	assert.Empty(t, plain.Inbound.Auth.JWT)
+}
+
+func TestOAuth_ValidateIsIdempotent(t *testing.T) {
+	c := validOAuthConfig(t)
+	for range 3 {
+		require.NoError(t, c.Validate())
+	}
+	assert.Len(t, c.Inbound.Auth.JWT, 2, "one derived source however often it is validated")
+
+	c.Inbound.OAuthServer.Disabled = true
+	require.NoError(t, c.Validate())
+	assert.Len(t, c.Inbound.Auth.JWT, 2, "and it is still one when the server is turned off")
+	assert.True(t, c.Inbound.Auth.JWT[1].Disabled)
+
+	c.Inbound.OAuthServer, c.Outbound.Token = nil, nil
+	require.NoError(t, c.Validate())
+	assert.Len(t, c.Inbound.Auth.JWT, 1, "it goes away only when the server is gone")
+}
+
+func TestOAuth_RequiresALoginMethod(t *testing.T) {
+	c := validOAuthConfig(t)
+	c.Inbound.Auth.JWT = nil
+	assert.ErrorContains(t, c.Validate(), "needs a way for people to log in")
+
+	c.Inbound.Auth.Basic = &BasicSource{}
+	c.Inbound.Auth.applyDefaults()
+	err := c.Validate()
+	assert.NotContains(t, fmt.Sprint(err), "needs a way for people to log in", "basic counts as a way to log in")
+
+	c.Inbound.OAuthServer.Disabled = true
+	c.Inbound.Auth.Basic = nil
+	assert.NoError(t, c.Validate(), "a disabled server needs none")
+}
+
+// Local is set by the proxy alone: a source that arrives marked Local (it has no
+// yaml tag) is dropped, so configuration cannot claim the in-process keys.
+func TestOAuth_LocalSourceIsNotConfigurable(t *testing.T) {
+	src := JWTSource{Name: "mine", Issuer: "https://idp.example.com", JWKSURL: "https://idp.example.com/jwks", Local: true}
+	c := validOAuthConfig(t)
+	c.Inbound.Auth.JWT = append(c.Inbound.Auth.JWT, src)
+	require.NoError(t, c.Validate())
+	for _, j := range c.Inbound.Auth.JWT {
+		if j.Name == "mine" {
+			t.Fatal("a source marked Local by hand is dropped on validation, only the derived one stays")
+		}
+	}
 }

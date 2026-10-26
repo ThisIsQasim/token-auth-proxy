@@ -23,6 +23,7 @@ import (
 
 	"github.com/ThisIsQasim/token-auth-proxy/internal/authn"
 	"github.com/ThisIsQasim/token-auth-proxy/internal/config"
+	"github.com/ThisIsQasim/token-auth-proxy/internal/oauth"
 	"github.com/ThisIsQasim/token-auth-proxy/internal/proxy"
 	"github.com/ThisIsQasim/token-auth-proxy/internal/telemetry"
 )
@@ -145,10 +146,14 @@ func run() error {
 	defer authRegistry.Close()
 	defer samlRegistry.Close()
 	basicRegistry := authn.NewBasicRegistry(logger)
+	oauthRegistry := oauth.NewRegistry(logger)
+	// The tokens the OAuth server issues are verified by the same JWT leg as any
+	// other, with its in-process keys and its denylist.
+	authRegistry.SetLocalSource(oauthRegistry.Keyfunc(), oauthRegistry.Denied)
 
 	transport := proxy.BuildTransport(cfg)
 	rp := proxy.New(source, logger, transport)
-	requireAuth := authn.NewMiddleware(source, authRegistry, samlRegistry, basicRegistry, authn.NewLoginRegistry(authRegistry, logger), logger)
+	requireAuth := authn.NewMiddleware(source, authRegistry, samlRegistry, basicRegistry, authn.NewLoginRegistry(authRegistry, logger), oauthRegistry, logger)
 
 	mux := http.NewServeMux()
 	mux.Handle("/healthz", proxy.HealthzHandler())   // deliberately unauthenticated

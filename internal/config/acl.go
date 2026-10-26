@@ -54,21 +54,21 @@ func applyACLDefaults(rules []ACLRule) {
 // validateACL checks rules against auth, so a principal naming a JWT
 // source or Basic user that doesn't exist fails at load time rather than
 // silently never matching.
-func validateACL(rules []ACLRule, auth InboundAuthConfig, oauth bool) error {
+func validateACL(rules []ACLRule, auth InboundAuthConfig) error {
 	for i, rule := range rules {
-		if err := validateACLRule(rule, auth, oauth); err != nil {
+		if err := validateACLRule(rule, auth); err != nil {
 			return fmt.Errorf("acl[%d]: %w", i, err)
 		}
 	}
 	return nil
 }
 
-func validateACLRule(rule ACLRule, auth InboundAuthConfig, oauth bool) error {
+func validateACLRule(rule ACLRule, auth InboundAuthConfig) error {
 	if len(rule.Principals) == 0 {
 		return fmt.Errorf("principals is required and must list at least one principal")
 	}
 	for i, p := range rule.Principals {
-		if err := validateACLPrincipal(p, auth, oauth); err != nil {
+		if err := validateACLPrincipal(p, auth); err != nil {
 			return fmt.Errorf("principals[%d]: %w", i, err)
 		}
 	}
@@ -93,7 +93,7 @@ func validateACLRule(rule ACLRule, auth InboundAuthConfig, oauth bool) error {
 	return nil
 }
 
-func validateACLPrincipal(p ACLPrincipal, auth InboundAuthConfig, oauth bool) error {
+func validateACLPrincipal(p ACLPrincipal, auth InboundAuthConfig) error {
 	switch p.Mode {
 	case ACLModeBasic, ACLModeJWT, ACLModeSAML:
 	default:
@@ -108,7 +108,7 @@ func validateACLPrincipal(p ACLPrincipal, auth InboundAuthConfig, oauth bool) er
 		if p.Mode != ACLModeJWT {
 			return fmt.Errorf("source is only valid with mode %q", ACLModeJWT)
 		}
-		if !jwtSourceExists(auth, p.Source) && (!oauth || p.Source != OAuthSourceName) {
+		if !jwtSourceExists(auth, p.Source) {
 			return fmt.Errorf("source %q does not name a configured inbound.auth.jwt source", p.Source)
 		}
 	}

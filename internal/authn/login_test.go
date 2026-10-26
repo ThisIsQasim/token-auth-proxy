@@ -104,7 +104,7 @@ func newLoginEnv(t *testing.T, o loginOpts) *loginEnv {
 		_, _ = io.WriteString(w, "backend:"+r.URL.RequestURI())
 	})
 	e.login = NewLoginRegistry(reg, testLogger())
-	handler = NewMiddleware(e.source, reg, saml, NewBasicRegistry(testLogger()), e.login, testLogger())(backend)
+	handler = NewMiddleware(e.source, reg, saml, NewBasicRegistry(testLogger()), e.login, nil, testLogger())(backend)
 	return e
 }
 
@@ -192,7 +192,7 @@ func TestLogin_NonBrowserRequestGets401NotRedirect(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			resp, _ := e.get(t, e.client(t, false), "/api", tc)
 			assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
-			assert.Contains(t, resp.Header.Values("WWW-Authenticate"), bearerChallenge)
+			assert.Contains(t, resp.Header.Values("WWW-Authenticate"), "Bearer")
 		})
 	}
 	assert.Zero(t, e.backend.Load())

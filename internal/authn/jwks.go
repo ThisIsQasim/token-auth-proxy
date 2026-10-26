@@ -3,6 +3,7 @@ package authn
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -71,6 +72,12 @@ type Registry struct {
 	now    func() time.Time
 
 	newKeyfunc newKeyfuncFunc
+
+	// local and denied are the keys and denylist of the proxy's own OAuth server,
+	// used for the source marked Local. Set once by SetLocalSource before the
+	// proxy serves.
+	local  jwt.Keyfunc
+	denied func(sub string) bool
 
 	seen atomic.Pointer[config.Config]
 
@@ -224,7 +231,7 @@ func (r *Registry) Reconcile(cfg *config.Config) {
 
 	desired := make(map[string]string, len(cfg.Inbound.Auth.JWT))
 	for _, j := range cfg.Inbound.Auth.JWT {
-		if j.Disabled {
+		if j.Disabled || j.Local {
 			continue
 		}
 		desired[j.Name] = fingerprint(j)
@@ -268,6 +275,28 @@ func (r *Registry) Reconcile(cfg *config.Config) {
 	}
 }
 
+// errNoLocalKeys means a Local source exists but the OAuth server never gave
+// the registry its keys; nothing it issued can then be verified.
+var errNoLocalKeys = errors.New("no keys for the local OAuth source")
+
+// SetLocalSource gives the registry what it needs to verify the tokens the
+// proxy's own OAuth server issues: their signing keys, and the denylist
+// that cuts a person off before their token expires. It must be called
+// before the proxy serves.
+func (r *Registry) SetLocalSource(kf jwt.Keyfunc, denied func(sub string) bool) {
+	r.local, r.denied = kf, denied
+}
+
+// deniedLocalSubject reports whether claims, from a token of the Local
+// source, belong to a denylisted subject.
+func (r *Registry) deniedLocalSubject(claims jwt.MapClaims) bool {
+	if r.denied == nil {
+		return false
+	}
+	sub, _ := claims["sub"].(string)
+	return r.denied(sub)
+}
+
 // Keyfunc returns the jwt.Keyfunc for src, building the underlying
 // resolver (and resolving an oidc_discovery_url to its jwks_uri) on
 // first use. Concurrent callers for the same source serialize on that
@@ -277,6 +306,13 @@ func (r *Registry) Reconcile(cfg *config.Config) {
 // hammer, and self-heals on the next request after the window without
 // needing a config change.
 func (r *Registry) Keyfunc(ctx context.Context, src config.JWTSource) (jwt.Keyfunc, error) {
+	if src.Local {
+		// The proxy's own keys: nothing to fetch, cache or retry.
+		if r.local == nil {
+			return nil, errNoLocalKeys
+		}
+		return r.local, nil
+	}
 	fp := fingerprint(src)
 
 	r.mu.Lock()

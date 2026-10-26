@@ -443,6 +443,11 @@ type JWTSource struct {
 	// Login, when set, additionally lets a browser sign in through this
 	// issuer with the OIDC authorization code flow. See JWTLogin.
 	Login *JWTLogin `yaml:"login,omitempty"`
+
+	// Local marks the source the proxy derives for the tokens its own OAuth
+	// server issues: they are verified with the server's in-process keys, so
+	// there is no JWKS to fetch. It is never read from configuration.
+	Local bool `yaml:"-"`
 }
 
 // JWTLogin turns a JWTSource whose issuer is an OpenID Provider into a

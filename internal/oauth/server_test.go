@@ -74,13 +74,13 @@ func newEnv(t *testing.T) *env {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc(config.OAuthPathPrefix+"/login", func(w http.ResponseWriter, r *http.Request) {
-		e.reg.ServeLogin(w, r, func(w http.ResponseWriter, r *http.Request, allow func(Identity, bool)) {
+		e.reg.ServeLogin(w, r, func(w http.ResponseWriter, r *http.Request, allow func(Identity)) {
 			if e.respond != nil {
 				e.respond(w, r)
 				return
 			}
-			allow(e.who, e.allowed)
-		})
+			allow(e.who)
+		}, func(string, string, []string) bool { return e.allowed })
 	})
 	mux.Handle(config.OAuthPathPrefix+"/", e.reg)
 	e.srv = httptest.NewServer(mux)
@@ -110,6 +110,13 @@ func (e *env) config() *config.Config {
 	require.NoError(e.t, err)
 	tokJSON, err := json.Marshal(map[string]any{"signing_keys": keys})
 	require.NoError(e.t, err)
+	// The OAuth server needs some way for people to log in; this one is never used
+	// (the tests stand in for the login with env.authenticate).
+	loginJSON, err := json.Marshal([]map[string]any{{
+		"issuer": "https://idp.example.com", "oidc_discovery_url": "https://idp.example.com/.well-known/openid-configuration",
+		"login": map[string]any{"client_id": "proxy", "sp_base_url": e.base},
+	}})
+	require.NoError(e.t, err)
 
 	fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
 	config.RegisterFlags(fs)
@@ -117,6 +124,7 @@ func (e *env) config() *config.Config {
 		"--target", "http://backend:9200",
 		"--inbound-oauth-server-json", string(srvJSON),
 		"--outbound-token-json", string(tokJSON),
+		"--inbound-auth-jwt-json", string(loginJSON),
 	}))
 	src, err := config.Resolve(fs)
 	require.NoError(e.t, err)

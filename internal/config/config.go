@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"slices"
 	"time"
 )
 
@@ -103,6 +104,10 @@ func (c *Config) Validate() error {
 		return err
 	}
 
+	// The OAuth source is derived below, so Validate can run more than once on
+	// the same Config without piling up copies.
+	c.Inbound.Auth.JWT = slices.DeleteFunc(c.Inbound.Auth.JWT, func(j JWTSource) bool { return j.Local })
+
 	if err := c.Inbound.Validate(); err != nil {
 		return err
 	}
@@ -110,8 +115,16 @@ func (c *Config) Validate() error {
 	if err := c.validateOAuth(); err != nil {
 		return err
 	}
+	if c.Inbound.OAuthServer != nil && c.Outbound.Token != nil {
+		// Present even when the server is disabled, but then disabled itself, so
+		// that ACL rules naming it stay valid while it is switched off (as they do
+		// for a disabled JWT source) and are not what makes a reload fail.
+		src := c.oauthSource()
+		src.Disabled = c.Inbound.OAuthServer.Disabled
+		c.Inbound.Auth.JWT = append(c.Inbound.Auth.JWT, src)
+	}
 
-	if err := validateACL(c.ACL, c.Inbound.Auth, c.OAuthEnabled()); err != nil {
+	if err := validateACL(c.ACL, c.Inbound.Auth); err != nil {
 		return err
 	}
 

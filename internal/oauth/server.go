@@ -233,11 +233,16 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 }
 
 // Authenticator authenticates the person behind a browser request with the
-// proxy's own login methods. If it identifies them it calls allow, once,
-// with who they are and whether the ACL lets them use the MCP endpoint;
-// otherwise it has already responded (an IdP redirect, a login page, an
-// error) and allow is never called.
-type Authenticator func(w http.ResponseWriter, r *http.Request, allow func(id Identity, mcpAllowed bool))
+// proxy's own login methods. If it identifies them it calls allow, once, with
+// who they are; otherwise it has already responded (an IdP redirect, a login
+// page, an error) and allow is never called.
+type Authenticator func(w http.ResponseWriter, r *http.Request, allow func(id Identity))
+
+// Permit reports whether the ACL would let a token with these claims use the
+// MCP endpoint. It is asked at login, about the token that is about to be
+// issued, so that someone who could never use it is told so now and not by a
+// 403 on every request.
+type Permit func(sub, email string, groups []string) bool
 
 // ServeLogin is the hand-off between the proxy's login and the OAuth flow.
 // The library has sent the browser here with a sealed login request; once
@@ -245,7 +250,7 @@ type Authenticator func(w http.ResponseWriter, r *http.Request, allow func(id Id
 // browser back to the library, which turns it into an authorization code.
 // Nothing about who the person is is taken from the request: the identity
 // comes only from authenticate.
-func (r *Registry) ServeLogin(w http.ResponseWriter, req *http.Request, authenticate Authenticator) {
+func (r *Registry) ServeLogin(w http.ResponseWriter, req *http.Request, authenticate Authenticator, permit Permit) {
 	s := r.srv.Load()
 	cfg := r.live.Load()
 	if s == nil || cfg == nil || !cfg.OAuthEnabled() {
@@ -269,16 +274,16 @@ func (r *Registry) ServeLogin(w http.ResponseWriter, req *http.Request, authenti
 		return
 	}
 
-	authenticate(w, req, func(who Identity, mcpAllowed bool) {
+	authenticate(w, req, func(who Identity) {
 		sub, email, groups, err := who.extract(cfg.Outbound.Token.Claims)
 		if err != nil {
 			r.logger.Warn("oauth login rejected", "reason", "no subject", "mode", who.Mode, "err", err)
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
-		if r.Denied(sub) || !mcpAllowed {
+		if denied := r.Denied(sub); denied || !permit(sub, email, groups) {
 			reason := "acl"
-			if r.Denied(sub) {
+			if denied {
 				reason = "denylist"
 			}
 			r.logger.Info("oauth login rejected", "reason", reason, "subject", truncate(sub, maxLoggedSubject), "client", d.ClientID)
