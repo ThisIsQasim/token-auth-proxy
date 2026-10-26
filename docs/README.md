@@ -37,6 +37,10 @@ SAML's login flow sends the password only to the IdP.
 
 It also has:
 
+- An OAuth server: tools such as MCP clients log in through any of the
+  methods above and get short-lived tokens the backend trusts, with refresh
+  and no state kept by the proxy. See the
+  [OAuth server guide](guides/oauth-server.md).
 - ACLs restricting which authenticated identities may use which
   methods and paths. See the [ACL guide](guides/acls.md).
 - OpenTelemetry traces, metrics, and structured logs, plus an
@@ -59,6 +63,7 @@ that, this isn't the tool for it.
 - **Authenticating a GitHub Actions workflow?** → [GitHub Actions guide](guides/github-actions.md)
 - **Setting up SAML SSO?** → [SAML SSO guide](guides/saml-sso.md)
 - **Signing browsers in with OIDC (Authentik, Keycloak, Google, ...)?** → [OIDC login guide](guides/oidc-login.md)
+- **Letting an MCP client (Claude Code, ...) log in and call the backend?** → [OAuth server guide](guides/oauth-server.md)
 - **Restricting who can use which paths?** → [ACL guide](guides/acls.md)
 - **Wiring up metrics/traces/logs?** → [Observability guide](guides/observability.md)
 - **Deploying with live config changes (e.g. in Kubernetes)?** → [Hot-reload & configuration guide](guides/hot-reload.md)

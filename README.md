@@ -139,8 +139,7 @@ routing exists to pick among multiple IdPs by) and `inbound.auth.basic`
 one realm, and two user lists guarding one backend is one user list)
 describe trusted credential sources. `inbound.oauth_server` and
 `outbound.token`, which go together, turn the proxy into an OAuth server
-that issues tokens the backend trusts (documented under "OAuth server"
-once it ships); the rest of `outbound` is reserved for a later pass
+that issues tokens the backend trusts (see [OAuth server](#oauth-server)); the rest of `outbound` is reserved for a later pass
 (rewriting credentials on the backend leg, e.g. verifying an inbound SAML
 assertion and minting an outbound OIDC-style JWT). See
 [`config.example.yaml`](./config.example.yaml) for a full commented-out
@@ -564,6 +563,125 @@ handling — see the content-negotiation gap below.
 default. Any existing SAML source config predating this needs it added
 — previously a SAML source only affected config validation, so this
 couldn't have been silently relied upon before.
+
+### OAuth server
+
+`inbound.oauth_server` and `outbound.token`, configured together, make the
+proxy an OAuth 2.0 authorization server for tools that need a token to call
+the backend (an MCP client such as Claude Code, for instance). People sign in
+with a login method the proxy already has (SAML, OIDC login or Basic) and the
+proxy hands the client an access token and a refresh token. For a walkthrough
+see the [OAuth server guide](docs/guides/oauth-server.md); this is the
+reference.
+
+- **Stateless.** Nothing is stored. A login request, an authorization code and
+  a refresh token are AES-256-GCM sealed values that carry what they need, each
+  bound to its own kind so one never opens as another. Access tokens are ES256
+  JWTs. Any number of replicas can serve the same flow with no sticky routing.
+- **Public clients only**, with PKCE `S256` required. The only grants are
+  `authorization_code` and `refresh_token`. A redirect URI is an exact `https`
+  URL, or an `http` loopback URL (`localhost`, `127.0.0.1`, `[::1]`) that matches
+  scheme, host and path with any port.
+- **Tokens** carry `iss` (`<sp_base_url>/_tap/oauth`), `aud`, `sub`, `groups`,
+  `email` (when the login has one), `client_id`, `iat`, `nbf`, `exp` and `jti`.
+  They are verified by the ordinary [JWT leg](#jwt-enforced) as a source named
+  `tap-oauth` (derived from the configuration; it has no JWKS URL and cannot be
+  declared by hand), so audience, issuer, expiry, algorithm and
+  [ACL](#authorization-acls) rules apply as they do to any token, and the token
+  is forwarded to the backend unchanged. A request is refused when its token's
+  subject is on the denylist.
+- **Discovery.** With the server enabled, the proxy's bearer challenges carry
+  `resource_metadata="<sp_base_url>/_tap/oauth/protected-resource"` (RFC 9728),
+  both the plain `Bearer` challenge and the `invalid_token` one.
+
+#### Configuration
+
+`inbound.oauth_server`:
+
+| Field | Default | Meaning |
+|---|---|---|
+| `sp_base_url` | required | The proxy's origin as the browser sees it; no path, query or credentials |
+| `mcp_url` | required | Public URL of the protected endpoint; same origin as `sp_base_url`, with a path that is not one the proxy serves itself |
+| `code_ttl` | `60s` | Lifetime of a finished login and the authorization code made from it (5s to 5m) |
+| `refresh_absolute_lifetime` | `24h` | Counted from the login; refreshing never extends it (up to 365d) |
+| `sealing_keys` | required | List of base64 32-byte keys. The first seals; every key opens |
+| `clients` | required | List of `{id, redirect_uris}`; ids unique |
+| `denylist.subjects` | none | Subjects refused at login, at refresh and on every request |
+| `disabled` | `false` | Staged but off, like a source's `disabled` |
+
+`outbound.token`:
+
+| Field | Default | Meaning |
+|---|---|---|
+| `signing_keys` | required | List of `{kid, private_key}`, P-256 in PEM (PKCS#8 or SEC1). The first signs; all are published and verify |
+| `access_token_ttl` | `15m` | 1m to 1h |
+| `audience` | `mcp_url` | The `aud` of issued tokens, checked by the proxy |
+| `claims.subject` / `.email` / `.groups` | `sub` / `email` / `groups` | The claim (JWT login) or attribute (SAML) of the login that each value is copied from. A Basic login's subject is its username |
+
+Both blocks hot-reload, and are overridable with `--inbound-oauth-server-json`
+and `--outbound-token-json` (or the matching `TAP_` variables). Keys are best
+written as `${file:PATH}` references. Validation rejects: one block without the
+other; no way to log in (`inbound.auth.saml`, a JWT source with `login`, or
+`inbound.auth.basic`); `mcp_url` on another origin; a JWT source named
+`tap-oauth`; a SAML `acs_path` or login `callback_path` under `/_tap/oauth`.
+The `tap-oauth` source stays present, disabled, while the server is `disabled`,
+so ACL rules that name it keep the configuration valid.
+
+The server rebuilds itself when keys, clients or URLs change; lifetimes,
+claim names and the denylist are read live.
+
+#### Login
+
+`/_tap/oauth/login` runs the proxy's own authentication (the same legs, in the
+same order, as for any request) and hands the result to the OAuth flow. Only
+what the proxy itself authenticated is used; nothing about the person is read
+from the request. Before a code is issued:
+
+- the person's subject is checked against the denylist;
+- the [ACL](#authorization-acls) is evaluated for the token they would get (the
+  `tap-oauth` source with their `sub`, `email` and `groups`) on `POST` to the
+  `mcp_url` path, and a person it would refuse is refused now; with no ACL rules
+  everyone authenticated passes;
+- a request that authenticated with a token this server issued is refused, so a
+  stolen access token cannot be turned into a new refresh token.
+
+A login request is valid for 10 minutes; the finished login for `code_ttl`.
+
+#### Routes
+
+Served by the proxy under `<sp_base_url>/_tap/oauth` and never forwarded; they
+are outside the ACL and need no credential, except `/login`, which performs
+one.
+
+| Path | Purpose |
+|---|---|
+| `/authorize`, `/authorize/callback`, `/token`, `/jwks.json` | The flow and the public keys |
+| `/login` | The hand-off described above |
+| `/.well-known/openid-configuration` | Discovery: authorization code and refresh grants, public clients (`none`), `S256` only |
+| `/protected-resource` | RFC 9728 metadata for `mcp_url` |
+
+The same two documents are also served at the locations a client that ignores the
+`resource_metadata` hint looks in: `/.well-known/oauth-protected-resource` (also
+with the `mcp_url` path appended), and for the issuer
+`/.well-known/oauth-authorization-server/_tap/oauth` and
+`/.well-known/openid-configuration/_tap/oauth`. Every other path under
+`/_tap/oauth`, including introspection, revocation, userinfo and device
+authorization, answers `404`.
+
+#### Limits
+
+- An authorization code is not single use; it is bound to the PKCE challenge and
+  expires after `code_ttl`.
+- There is no per-token revocation. Cut a person off with the denylist (takes
+  effect on their next request), or sign everyone out by replacing the sealing
+  keys.
+- Groups are a snapshot taken at login. They are not refreshed; a changed
+  membership applies at the next login, at the latest `refresh_absolute_lifetime`
+  after the last.
+- The login request and the finished login travel in URLs as encrypted values, and
+  the proxy never logs them, but a load balancer or ingress in front of it will.
+- Tokens are bearer tokens. Use `https` outside local testing.
+
 
 ## Authorization (ACLs)
 
