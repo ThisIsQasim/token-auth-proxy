@@ -112,6 +112,7 @@ func TestOAuth_Validate(t *testing.T) {
 	}{
 		{"missing sp_base_url", func(c *Config) { c.Inbound.OAuthServer.SPBaseURL = "" }, "sp_base_url is required"},
 		{"sp_base_url with query", func(c *Config) { c.Inbound.OAuthServer.SPBaseURL = "https://os.example.com/?x=1" }, "no query"},
+		{"sp_base_url with path", func(c *Config) { c.Inbound.OAuthServer.SPBaseURL = "https://os.example.com/proxy" }, "no path"},
 		{"missing mcp_url", func(c *Config) { c.Inbound.OAuthServer.MCPURL = "" }, "mcp_url is required"},
 		{"mcp_url other host", func(c *Config) { c.Inbound.OAuthServer.MCPURL = "https://other.example.com/mcp" }, "must share sp_base_url's origin"},
 		{"mcp_url other scheme", func(c *Config) { c.Inbound.OAuthServer.MCPURL = "http://os.example.com/mcp" }, "must share sp_base_url's origin"},

@@ -265,6 +265,9 @@ func (o *OAuthServerConfig) validate() error {
 	if base.RawQuery != "" || strings.Contains(o.SPBaseURL, "#") || base.User != nil {
 		return fmt.Errorf("sp_base_url %q must be an origin with no query, fragment or credentials", o.SPBaseURL)
 	}
+	if base.Path != "" && base.Path != "/" {
+		return fmt.Errorf("sp_base_url %q must be an origin with no path: the proxy serves its routes from the root", o.SPBaseURL)
+	}
 	if o.MCPURL == "" {
 		return fmt.Errorf("mcp_url is required")
 	}
