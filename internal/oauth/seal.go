@@ -18,6 +18,7 @@ const (
 	kindPending = "pending" // a login request that nobody has authenticated for yet
 	kindDone    = "done"    // a login request after a successful login
 	kindRefresh = "refresh"
+	kindClient  = "client" // the ID of a dynamically registered client
 )
 
 var errBadToken = errors.New("invalid token")

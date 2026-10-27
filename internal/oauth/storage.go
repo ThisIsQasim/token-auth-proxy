@@ -32,6 +32,7 @@ type storage struct {
 	crypto  op.Crypto
 	keys    *keyManager
 	clients map[string]*client
+	issuer  string
 	live    func() *config.Config // the current config, nil when the server is off
 	now     func() time.Time
 }
@@ -69,7 +70,7 @@ func (s *storage) CreateAuthRequest(_ context.Context, r *oidc.AuthRequest, _ st
 	}
 	// Checks the library does not make, or makes more loosely. They run after its
 	// own validation, so the client and redirect_uri are known to be well formed.
-	if c, ok := s.clients[r.ClientID]; !ok || !c.allowsRedirect(r.RedirectURI) {
+	if c, ok := s.lookupClient(r.ClientID); !ok || !c.allowsRedirect(r.RedirectURI) {
 		return nil, oidc.ErrInvalidRequestRedirectURI().WithDescription("The requested redirect_uri is not registered for this client.")
 	}
 	if r.CodeChallenge == "" || r.CodeChallengeMethod != oidc.CodeChallengeMethodS256 {
@@ -219,7 +220,7 @@ func (s *storage) KeySet(context.Context) ([]op.Key, error) { return s.keys.keyS
 // ---- clients ----
 
 func (s *storage) GetClientByClientID(_ context.Context, id string) (op.Client, error) {
-	c, ok := s.clients[id]
+	c, ok := s.lookupClient(id)
 	if !ok {
 		return nil, errNotFound
 	}

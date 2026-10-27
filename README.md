@@ -613,7 +613,9 @@ reference.
 | `code_ttl` | `60s` | Lifetime of a finished login and the authorization code made from it (5s to 5m) |
 | `refresh_absolute_lifetime` | `24h` | Counted from the login; refreshing never extends it (up to 365d) |
 | `sealing_keys` | required | List of base64 32-byte keys. The first seals; every key opens |
-| `clients` | required | List of `{id, redirect_uris}`; ids unique |
+| `clients` | required unless `dynamic_registration` is on | List of `{id, redirect_uris}`; ids unique |
+| `dynamic_registration.enabled` | `false` | Lets clients register themselves at `/_tap/oauth/register` ([RFC 7591](#dynamic-client-registration)), so nobody has to enter a client ID |
+| `dynamic_registration.redirect_uris` | none | The exact `https` redirect URIs a registering client may use (at most 20). With none, only loopback `http` URIs are accepted. Read live |
 | `denylist.subjects` | none | Subjects (compared ignoring case; no surrounding whitespace) refused at login, at code exchange, at refresh and on every request |
 | `disabled` | `false` | Staged but off, like a source's `disabled` |
 
@@ -661,6 +663,30 @@ from the request. Before a code is issued:
 A login request is valid for 10 minutes; the finished login for `code_ttl`.
 Only `GET` reaches the login route.
 
+#### Dynamic client registration
+
+With `dynamic_registration.enabled`, a client posts its metadata to
+`/_tap/oauth/register` and gets a client ID back, so a person adds the server
+by its URL alone. The discovery document then carries `registration_endpoint`.
+
+- **Stateless.** The client ID is the registration, sealed like the other
+  values (its own kind, so it opens as nothing else). It never expires on its
+  own; replacing every sealing key revokes all registered clients.
+- **Public clients only.** `token_endpoint_auth_method` must be `none` (or
+  absent), `grant_types` a subset of `authorization_code` and `refresh_token`,
+  `response_types` `["code"]`. PKCE is required as for any client.
+- **Redirect URIs are the control.** Each must be an `http` loopback URI
+  (`localhost`, `127.0.0.1`, `[::1]`, any port) or an exact entry of
+  `dynamic_registration.redirect_uris`; up to 10, no fragment or credentials.
+  Anything else is `invalid_redirect_uri`. A registered client is checked
+  against the live configuration on every request, so removing an entry, or
+  turning registration off, ends the clients that relied on it.
+- **No authentication and no consent screen.** Anyone who can reach the server
+  can register, but only for a callback the operator allowed, and a login still
+  needs the person to sign in. A registration says nothing about who the client
+  is: its name is only a label in the log.
+- The body is limited to 16 KiB. The endpoint answers cross-origin requests.
+
 #### Routes
 
 Served by the proxy under `<sp_base_url>/_tap/oauth` and never forwarded; they
@@ -671,6 +697,7 @@ one.
 |---|---|
 | `/authorize`, `/authorize/callback`, `/token`, `/jwks.json` | The flow and the public keys |
 | `/login` | The hand-off described above |
+| `/register` | `POST` client registration; `404` unless `dynamic_registration` is on |
 | `/.well-known/openid-configuration` | Discovery: authorization code and refresh grants, public clients (`none`), `S256` only |
 | `/protected-resource` | RFC 9728 metadata for `mcp_url` |
 

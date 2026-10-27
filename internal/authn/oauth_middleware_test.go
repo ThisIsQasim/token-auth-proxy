@@ -48,6 +48,7 @@ type oauthMW struct {
 	sealKey  string
 	denylist []string
 	disabled bool
+	dynamic  map[string]any // the dynamic_registration setting, nil for off
 }
 
 func newOAuthMW(t *testing.T) *oauthMW { return newOAuthMWWith(t, false) }
@@ -111,13 +112,17 @@ func (m *oauthMW) config() *config.Config {
 			"session_signing_key_env": "OAUTH_MW_SAML_KEY", "session_duration": "1h",
 		})}
 	}
+	server := map[string]any{
+		"disabled": m.disabled, "sp_base_url": m.base, "mcp_url": m.base + mcpPath, "sealing_keys": []string{m.sealKey},
+		"clients":  []map[string]any{{"id": "claude-code", "redirect_uris": []string{"http://localhost/callback"}}},
+		"denylist": map[string]any{"subjects": m.denylist},
+	}
+	if m.dynamic != nil {
+		server["dynamic_registration"] = m.dynamic
+	}
 	args := append([]string{"--target", "http://opensearch:9200"}, login...)
 	args = append(args,
-		"--inbound-oauth-server-json", mustJSON(map[string]any{
-			"disabled": m.disabled, "sp_base_url": m.base, "mcp_url": m.base + mcpPath, "sealing_keys": []string{m.sealKey},
-			"clients":  []map[string]any{{"id": "claude-code", "redirect_uris": []string{"http://localhost/callback"}}},
-			"denylist": map[string]any{"subjects": m.denylist},
-		}),
+		"--inbound-oauth-server-json", mustJSON(server),
 		"--outbound-token-json", mustJSON(map[string]any{"signing_keys": []map[string]string{{"kid": "k1", "private_key": m.signPEM}}}),
 		// The MCP endpoint is for readers (by group) and for alice (by name, which is
 		// how a Basic login shows up); bob is neither.

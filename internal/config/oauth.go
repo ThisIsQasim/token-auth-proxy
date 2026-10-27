@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/pem"
 	"fmt"
+	"net/url"
 	"slices"
 	"strings"
 	"time"
@@ -207,12 +208,33 @@ type OAuthServerConfig struct {
 	// Clients are the public (PKCE-only, no secret) clients allowed to log in.
 	Clients []OAuthClient `yaml:"clients"`
 
+	// DynamicRegistration lets clients register themselves (RFC 7591), so a
+	// person adds the server with no client ID to look up and enter. Off unless
+	// enabled; the Clients above keep working alongside it.
+	DynamicRegistration DynamicRegistration `yaml:"dynamic_registration,omitempty"`
+
 	// Denylist cuts off people immediately: a listed subject gets no new
 	// login, no refresh and no access.
 	Denylist OAuthDenylist `yaml:"denylist,omitempty"`
 
 	sealing [][]byte
 }
+
+// DynamicRegistration configures client self-registration at
+// <issuer>/register. A registered client is public (no secret, PKCE
+// required) and its redirect URIs are checked against what is allowed here, so
+// registering cannot point a login at a site of the registrant's choosing.
+type DynamicRegistration struct {
+	Enabled bool `yaml:"enabled,omitempty"`
+
+	// RedirectURIs are the https callbacks a client may register, matched
+	// exactly. Loopback http URIs (localhost, 127.0.0.1, [::1]) are always
+	// accepted, on any port, as RFC 8252 asks of native apps. Empty by default,
+	// which accepts loopback only.
+	RedirectURIs []string `yaml:"redirect_uris,omitempty"`
+}
+
+const maxDynamicRedirectURIs = 20
 
 // OAuthClient is one registered client.
 type OAuthClient struct {
@@ -311,8 +333,11 @@ func (o *OAuthServerConfig) validate() error {
 		sealing = append(sealing, k)
 	}
 
-	if len(o.Clients) == 0 {
-		return fmt.Errorf("clients requires at least one client")
+	if len(o.Clients) == 0 && !o.DynamicRegistration.Enabled {
+		return fmt.Errorf("clients requires at least one client, unless dynamic_registration is enabled")
+	}
+	if err := o.DynamicRegistration.validate(); err != nil {
+		return fmt.Errorf("dynamic_registration: %w", err)
 	}
 	ids := make(map[string]bool, len(o.Clients))
 	for i, c := range o.Clients {
@@ -449,4 +474,40 @@ func (c *Config) oauthSource() JWTSource {
 		ClockSkew:   defaultClockSkew,
 		Local:       true,
 	}
+}
+
+func (d DynamicRegistration) validate() error {
+	if len(d.RedirectURIs) > maxDynamicRedirectURIs {
+		return fmt.Errorf("redirect_uris lists %d URIs, at most %d", len(d.RedirectURIs), maxDynamicRedirectURIs)
+	}
+	for i, raw := range d.RedirectURIs {
+		u, err := parseAbsoluteHTTPURL("redirect URI", raw)
+		if err != nil {
+			return fmt.Errorf("redirect_uris[%d]: %w", i, err)
+		}
+		if u.Scheme != "https" {
+			return fmt.Errorf("redirect_uris[%d] %q must be https: loopback http URIs are always accepted and need no entry", i, raw)
+		}
+		if strings.Contains(raw, "#") || u.User != nil {
+			return fmt.Errorf("redirect_uris[%d] %q must have no fragment or credentials", i, raw)
+		}
+	}
+	return nil
+}
+
+// AllowsDynamicRedirect reports whether a dynamically registered client may
+// use raw as a redirect URI: an http loopback URI on any port, or an https
+// URI listed in RedirectURIs exactly.
+func (d DynamicRegistration) AllowsDynamicRedirect(raw string) bool {
+	if validateRedirectURI(raw) != nil {
+		return false
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	if u.Scheme == "http" {
+		return IsLoopbackHost(u.Hostname())
+	}
+	return slices.Contains(d.RedirectURIs, raw)
 }

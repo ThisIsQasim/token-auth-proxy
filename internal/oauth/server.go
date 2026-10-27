@@ -127,6 +127,9 @@ func fingerprint(cfg *config.Config) string {
 	for _, c := range srv.Clients {
 		write(append([]string{"client", c.ID}, c.RedirectURIs...)...)
 	}
+	// Only whether registration is on is built in; the permitted redirect URIs
+	// are read live, like the denylist.
+	write("register", fmt.Sprint(srv.DynamicRegistration.Enabled))
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
@@ -155,7 +158,7 @@ func (r *Registry) build(cfg *config.Config, fp string) (*server, error) {
 		clients[c.ID] = &client{cfg: c, issuer: issuer}
 	}
 	st := &storage{
-		sealer: sl, crypto: op.NewAES256GCMCrypto(cryptoKey, ""), keys: keys, clients: clients,
+		sealer: sl, crypto: op.NewAES256GCMCrypto(cryptoKey, ""), keys: keys, clients: clients, issuer: issuer,
 		live: r.live.Load, now: time.Now,
 	}
 
@@ -179,7 +182,7 @@ func (r *Registry) build(cfg *config.Config, fp string) (*server, error) {
 		return nil, fmt.Errorf("build provider: %w", err)
 	}
 
-	discovery, err := discoveryDocument(provider, st, issuer)
+	discovery, err := discoveryDocument(provider, st, issuer, srvCfg.DynamicRegistration.Enabled)
 	if err != nil {
 		return nil, err
 	}
@@ -272,6 +275,8 @@ func (r *Registry) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		serveDoc(w, req, s.metadata)
 	case rel == "/.well-known/openid-configuration":
 		serveDoc(w, req, s.discovery)
+	case rel == "/register":
+		r.serveRegister(w, req, s)
 	case routes[rel]:
 		s.handler.ServeHTTP(w, req)
 	default:
@@ -306,7 +311,7 @@ func serveDoc(w http.ResponseWriter, req *http.Request, doc []byte) {
 
 // discoveryDocument is the provider's own, cut down to what this server does:
 // the authorization code grant with refresh, for public clients with PKCE.
-func discoveryDocument(provider *op.Provider, st *storage, issuer string) ([]byte, error) {
+func discoveryDocument(provider *op.Provider, st *storage, issuer string, registration bool) ([]byte, error) {
 	d := op.CreateDiscoveryConfig(op.ContextWithIssuer(context.Background(), issuer), provider, st)
 	d.IntrospectionEndpoint, d.UserinfoEndpoint, d.RevocationEndpoint = "", "", ""
 	d.EndSessionEndpoint, d.DeviceAuthorizationEndpoint, d.CheckSessionIframe = "", "", ""
@@ -318,6 +323,9 @@ func discoveryDocument(provider *op.Provider, st *storage, issuer string) ([]byt
 	d.ResponseModesSupported = []string{"query"}
 	d.TokenEndpointAuthMethodsSupported = []oidc.AuthMethod{oidc.AuthMethodNone}
 	d.TokenEndpointAuthSigningAlgValuesSupported = nil
+	if registration {
+		d.RegistrationEndpoint = issuer + "/register"
+	}
 	return json.Marshal(d)
 }
 

@@ -79,7 +79,8 @@ the backend connection, and the server name is still checked.
 | `code_ttl` | `60s` | How long a login result and its authorization code are valid (5s to 5m) |
 | `refresh_absolute_lifetime` | `24h` | How long after the login a refresh token can renew the session. Refreshing never extends it |
 | `sealing_keys` | required | Base64 32-byte keys. The first seals; every key opens, which is how you rotate |
-| `clients` | required | Public clients (PKCE required, no secret). `redirect_uris` are exact `https` URLs, or `http` loopback URLs (`localhost`, `127.0.0.1`, `[::1]`) that match on any port |
+| `clients` | required unless `dynamic_registration` is on | Public clients (PKCE required, no secret). `redirect_uris` are exact `https` URLs, or `http` loopback URLs (`localhost`, `127.0.0.1`, `[::1]`) that match on any port |
+| `dynamic_registration` | off | `enabled`, and `redirect_uris`: the `https` callbacks a client may register. Empty by default, which allows loopback only |
 | `denylist.subjects` | none | Subjects (the `sub` of the login, compared ignoring case, no surrounding whitespace) that are refused at login, at code exchange, at refresh and on every request |
 | `disabled` | `false` | Takes the server out of rotation without deleting its configuration |
 
@@ -165,7 +166,9 @@ fails with `no permissions for [indices:data/read/search]`.
 
 ## Connect a client
 
-Register a client in `clients` with the redirect URI it uses. A client needs to support
+Either register each client in `clients` with the redirect URI it uses, or turn on
+[dynamic registration](#let-clients-register-themselves) and let them register
+themselves. A client needs to support
 the OAuth authorization code flow with PKCE (S256), find the authorization server from
 the `resource_metadata` in the `401`, and use a public client ID. The proxy also serves
 the two documents at the well-known locations a client looks in when it does not follow
@@ -173,9 +176,39 @@ that hint: `/.well-known/oauth-protected-resource` (also with the MCP path appen
 for the issuer, `/.well-known/oauth-authorization-server/_tap/oauth` and
 `/.well-known/openid-configuration/_tap/oauth`.
 
+### Let clients register themselves
+
+Dynamic client registration (RFC 7591) removes the client ID from the setup: the client
+registers itself the first time and the person only enters the URL.
+
+```yaml
+inbound:
+  oauth_server:
+    dynamic_registration:
+      enabled: true
+      # The https callbacks a client may register, for hosted clients such as
+      # claude.ai. Loopback http callbacks are always accepted and need no entry.
+      redirect_uris:
+        - https://claude.ai/api/mcp/auth_callback
+```
+
+`clients` becomes optional, and anything listed there keeps working. Registration needs no
+credential and shows no consent screen, so the redirect URIs are the control: a client can
+only register a callback on that list or on the machine's own loopback address, and a login
+still needs the person to sign in. Registered clients hold nothing on the server, never
+expire, and stop working as soon as their callback leaves the list or registration is turned
+off. Replacing every sealing key revokes all of them.
+
 ### Claude Code
 
-Register the client the way the configuration above does (`id: claude-code`, redirect URI
+With dynamic registration on, add the server by its URL and log in:
+
+```sh
+claude mcp add --transport http os https://os.example.com/_plugins/_ml/mcp
+claude mcp login os
+```
+
+Without it, register the client the way the configuration above does (`id: claude-code`, redirect URI
 `http://localhost/callback`; Claude Code redirects to `http://localhost:<port>/callback`, and
 a loopback URI matches on any port). Then add the server with the client ID, and log in:
 
@@ -202,7 +235,10 @@ again only after `refresh_absolute_lifetime`, or if you are removed with the den
 
 ### claude.ai, Claude Desktop and Claude mobile
 
-These apps share one connector and one callback URL, so one client covers all of them:
+With dynamic registration on and `https://claude.ai/api/mcp/auth_callback` in its
+`redirect_uris`, leave the OAuth client setting on **Register automatically** and enter only
+the `mcp_url`. Otherwise these apps share one connector and one callback URL,
+so one client covers all of them:
 
 ```yaml
 clients:
@@ -214,9 +250,9 @@ clients:
 Add the connector in **Customize > Connectors** (on a Team or Enterprise plan, an Owner adds it in
 **Organization settings > Connectors**, and members then connect with their own account). The connector then shows up in the Claude mobile apps for the same account, where you turn it on from the **+** menu of a chat. Enter the
 `mcp_url` as the server URL and, under the OAuth client setting, choose **Use your own OAuth client**:
-client ID `claude-ai`, secret left blank, since it is a public client that relies on PKCE. The server
-does not offer Dynamic Client Registration or Client ID Metadata Documents, so the other two options
-(**Register automatically** and **Use Claude's published identity**) will not work. Claude cannot
+client ID `claude-ai`, secret left blank, since it is a public client that relies on PKCE. Without
+dynamic registration, **Register automatically** will not work, and neither will **Use Claude's
+published identity**, since the server does not support Client ID Metadata Documents. Claude cannot
 change a connector's authentication settings afterwards; remove it and add it again.
 
 The server has to be reachable from Anthropic's network (`160.79.104.0/21`), including its discovery
@@ -276,6 +312,7 @@ backend, and not subject to the ACL:
 | `/login` | Runs the proxy's own login, then hands the result back |
 | `/authorize/callback` | Turns a finished login into an authorization code |
 | `/token` | Exchanges a code or a refresh token |
+| `/register` | Client registration, only with `dynamic_registration` on |
 | `/jwks.json` | The public signing keys |
 | `/.well-known/openid-configuration` | Discovery document |
 | `/protected-resource` | Protected resource metadata for `mcp_url` |

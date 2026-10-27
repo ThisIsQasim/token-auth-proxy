@@ -79,6 +79,67 @@ func TestOAuth_DefaultsAndAccessors(t *testing.T) {
 	assert.Len(t, srv.SealingKeyBytes()[0], 32)
 }
 
+const hostedCallback = "https://claude.ai/api/mcp/auth_callback"
+
+func TestOAuth_DynamicRegistration(t *testing.T) {
+	t.Run("off by default", func(t *testing.T) {
+		c := validOAuthConfig(t)
+		require.NoError(t, c.Validate())
+		assert.False(t, c.Inbound.OAuthServer.DynamicRegistration.Enabled)
+		assert.Nil(t, c.Inbound.OAuthServer.DynamicRegistration.RedirectURIs)
+	})
+	t.Run("accepts loopback only unless redirect URIs are listed", func(t *testing.T) {
+		c := validOAuthConfig(t)
+		c.Inbound.OAuthServer.DynamicRegistration = DynamicRegistration{Enabled: true}
+		c.applyDefaults()
+		require.NoError(t, c.Validate())
+		dr := c.Inbound.OAuthServer.DynamicRegistration
+		assert.Empty(t, dr.RedirectURIs)
+		assert.True(t, dr.AllowsDynamicRedirect("http://localhost:1234/cb"))
+		assert.False(t, dr.AllowsDynamicRedirect(hostedCallback))
+	})
+	t.Run("clients become optional", func(t *testing.T) {
+		c := validOAuthConfig(t)
+		c.Inbound.OAuthServer.Clients = nil
+		assert.ErrorContains(t, c.Validate(), "clients requires")
+		c.Inbound.OAuthServer.DynamicRegistration = DynamicRegistration{Enabled: true}
+		c.applyDefaults()
+		assert.NoError(t, c.Validate())
+	})
+	t.Run("invalid redirect lists", func(t *testing.T) {
+		for name, uris := range map[string][]string{
+			"http":        {"http://example.com/cb"},
+			"loopback":    {"http://localhost/cb"},
+			"fragment":    {"https://example.com/cb#x"},
+			"credentials": {"https://u:p@example.com/cb"},
+			"relative":    {"/cb"},
+			"too many":    make([]string, maxDynamicRedirectURIs+1),
+		} {
+			c := validOAuthConfig(t)
+			c.Inbound.OAuthServer.DynamicRegistration = DynamicRegistration{Enabled: true, RedirectURIs: uris}
+			assert.ErrorContains(t, c.Validate(), "dynamic_registration", name)
+		}
+	})
+	t.Run("what a client may register", func(t *testing.T) {
+		dr := DynamicRegistration{Enabled: true, RedirectURIs: []string{hostedCallback}}
+		for uri, want := range map[string]bool{
+			"http://localhost:8765/callback":         true,
+			"http://127.0.0.1:1/cb":                  true,
+			"http://[::1]:9/cb":                      true,
+			hostedCallback:                           true,
+			hostedCallback + "/x":                    false,
+			"https://claude.ai/api/mcp/auth_callbac": false,
+			"http://claude.ai/api/mcp/auth_callback": false,
+			"http://localhost.evil.example/cb":       false,
+			"http://localhost:8765/cb#x":             false,
+			"https://evil.example/cb":                false,
+			"":                                       false,
+		} {
+			assert.Equal(t, want, dr.AllowsDynamicRedirect(uri), uri)
+		}
+	})
+}
+
 func TestOAuth_NotConfigured(t *testing.T) {
 	c := &Config{Target: "http://opensearch:9200"}
 	c.applyDefaults()
