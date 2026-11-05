@@ -15,7 +15,7 @@ Claude Code ──OAuth──> token-auth-proxy ──SAML─┘
 
 The proxy signs people in with SAML and issues its own short-lived tokens, because a SAML
 login gives a client nothing it can refresh. OpenSearch verifies those tokens against the
-proxy's public keys. The [OAuth server guide](oauth-server.md) explains each field used here.
+proxy's public keys. The [MCP OAuth server guide](mcp-oauth-server.md) explains each field used here.
 
 This example assumes:
 

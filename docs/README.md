@@ -41,7 +41,7 @@ It also has:
 - An OAuth server: tools such as MCP clients log in through any of the
   methods above and get short-lived tokens, with refresh and no
   state kept by the proxy. The backend needs no auth of its own. See the
-  [OAuth server guide](guides/oauth-server.md).
+  [MCP OAuth server guide](guides/mcp-oauth-server.md).
 - ACLs restricting which authenticated identities may use which
   methods and paths. See the [ACL guide](guides/acls.md).
 - OpenTelemetry traces, metrics, and structured logs, plus an
@@ -66,7 +66,7 @@ tool for it.
 - **Authenticating a GitHub Actions workflow?** → [GitHub Actions guide](guides/github-actions.md)
 - **Setting up SAML SSO?** → [SAML SSO guide](guides/saml-sso.md)
 - **Signing browsers in with OIDC (Authentik, Keycloak, Google, ...)?** → [OIDC login guide](guides/oidc-login.md)
-- **Letting an MCP client (Claude Code, ...) log in and call the backend?** → [OAuth server guide](guides/oauth-server.md)
+- **Letting an MCP client (Claude Code, ...) log in and call the backend?** → [MCP OAuth server guide](guides/mcp-oauth-server.md)
 - **Adding MCP to an OpenSearch that already uses SAML?** → [OpenSearch MCP with SAML example](guides/opensearch-mcp-saml.md)
 - **Restricting who can use which paths?** → [ACL guide](guides/acls.md)
 - **Wiring up metrics/traces/logs?** → [Observability guide](guides/observability.md)

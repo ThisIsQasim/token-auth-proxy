@@ -579,7 +579,7 @@ proxy an OAuth 2.0 authorization server for tools that need a token to call
 the backend (an MCP client such as Claude Code, for instance). People sign in
 with a login method the proxy already has (SAML, OIDC login or Basic) and the
 proxy hands the client an access token and a refresh token. For a walkthrough
-see the [OAuth server guide](docs/guides/oauth-server.md); this is the
+see the [MCP OAuth server guide](docs/guides/mcp-oauth-server.md); this is the
 reference.
 
 - **Stateless.** Nothing is stored. A login request, an authorization code and

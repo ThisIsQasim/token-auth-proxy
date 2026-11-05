@@ -1,4 +1,4 @@
-# OAuth server
+# MCP OAuth server
 
 Let MCP clients such as Claude Code log in through the proxy and get a short-lived
 token. Nobody is handed a long-lived secret, and with dynamic client registration a person
