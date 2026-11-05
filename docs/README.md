@@ -48,7 +48,7 @@ It also has:
   always-on `/metrics` endpoint. See the
   [observability guide](guides/observability.md).
 - Prometheus label enforcement from token claims. See the
-  [README](../README.md#prometheus-label-enforcement).
+  [Prom label proxy guide](guides/prom-label-proxy.md).
 - Config hot-reload with no restart. See the
   [hot-reload guide](guides/hot-reload.md).
 
@@ -69,6 +69,7 @@ tool for it.
 - **Letting an MCP client (Claude Code, ...) log in and call the backend?** → [MCP OAuth server guide](guides/mcp-oauth-server.md)
 - **Adding MCP to an OpenSearch that already uses SAML?** → [OpenSearch MCP with SAML example](guides/opensearch-mcp-saml.md)
 - **Restricting who can use which paths?** → [ACL guide](guides/acls.md)
+- **Giving tenants one Prometheus, separated by a token claim?** → [Prom label proxy guide](guides/prom-label-proxy.md)
 - **Wiring up metrics/traces/logs?** → [Observability guide](guides/observability.md)
 - **Deploying with live config changes (e.g. in Kubernetes)?** → [Hot-reload & configuration guide](guides/hot-reload.md)
 - **Need the exact flag/env var/YAML field for something?** → the [main README](../README.md)'s Configuration, Auth, and Observability sections are the authoritative reference.

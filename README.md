@@ -806,7 +806,8 @@ acl:
 `outbound.prom_label_proxy` restricts callers to their own Prometheus series,
 in the manner of [prom-label-proxy](https://github.com/prometheus-community/prom-label-proxy),
 with the label values taken from their token claims. It runs after the ACL
-and is off unless the block is present.
+and is off unless the block is present. For a walkthrough see the
+[Prom label proxy guide](docs/guides/prom-label-proxy.md); this is the reference.
 
 ```yaml
 outbound:
