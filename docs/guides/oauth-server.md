@@ -1,8 +1,9 @@
-# OAuth server for MCP clients
+# OAuth server
 
 Let MCP clients such as Claude Code log in through the proxy and get a short-lived
-token your backend trusts. Nobody is handed a long-lived secret, the backend sees who
-each request is for, and with dynamic client registration a person only needs the URL.
+token. Nobody is handed a long-lived secret, and with dynamic client registration a person
+only needs the URL. The proxy enforces the token itself, so the backend needs no auth of its
+own. One that has it can verify the same token and see who each request is for.
 
 Any login the proxy can run in a browser works, and clients see no difference:
 
@@ -13,7 +14,7 @@ Any login the proxy can run in a browser works, and clients see no difference:
 
 The proxy keeps no state for this. Login requests, authorization codes and
 refresh tokens are encrypted values that carry what they need, and the tokens
-are JWTs that the proxy and the backend both verify with the proxy's public keys.
+are JWTs verified with the proxy's public keys.
 
 ## How it works
 
@@ -27,7 +28,8 @@ are JWTs that the proxy and the backend both verify with the proxy's public keys
 4. The client exchanges the code at `/_tap/oauth/token` for an access token and a
    refresh token, and calls the protected URL with `Authorization: Bearer ...`.
 5. The proxy verifies the token like any other JWT, applies the ACL, and forwards
-   the request with the token unchanged. The backend verifies it too.
+   the request with the token unchanged. A backend with its own auth can verify it too;
+   one without ignores it.
 
 ## Configure the proxy
 
@@ -40,15 +42,15 @@ openssl rand -base64 32 > seal.key
 ```
 
 ```yaml
-target: http://opensearch:9200
+target: http://backend:8080
 inbound:
   auth:
     # Any login method: saml as here, an inbound.auth.jwt source with login, or basic.
     saml:
       # ...
   oauth_server:
-    sp_base_url: https://os.example.com
-    mcp_url: https://os.example.com/_plugins/_ml/mcp
+    sp_base_url: https://mcp.example.com
+    mcp_url: https://mcp.example.com/mcp
     sealing_keys:
       - ${file:/keys/seal.key}
     dynamic_registration:
@@ -63,18 +65,17 @@ acl:
       - mode: jwt
         source: tap-oauth
         claims:
-          groups: os-mcp-readers
+          groups: mcp-users
     paths:
-      - /_plugins/_ml/mcp
+      - /mcp
 ```
 
 `inbound.oauth_server` and `outbound.token` go together, and at least one way to log
 in must be configured.
 
-If the backend is an `https` URL whose certificate comes from a private CA (an OpenSearch
-cluster with operator-issued certificates, say), set `target_ca_cert` to that CA bundle, for
-example `target_ca_cert: ${file:/etc/opensearch-ca/ca.crt}`. It replaces the system roots for
-the backend connection, and the server name is still checked.
+If the backend is an `https` URL whose certificate comes from a private CA, set
+`target_ca_cert` to that CA bundle, for example `target_ca_cert: ${file:/etc/backend-ca/ca.crt}`.
+It replaces the system roots for the backend connection, and the server name is still checked.
 
 **`inbound.oauth_server`**
 
@@ -96,7 +97,7 @@ the backend connection, and the server name is still checked.
 |---|---|---|
 | `signing_keys` | required | ES256 (P-256) private keys in PEM, each with a `kid`. The first signs; all are published and verify |
 | `access_token_ttl` | `15m` | Access token lifetime (1m to 1h) |
-| `audience` | `mcp_url` | The token's `aud`. The proxy and the backend both check it |
+| `audience` | `mcp_url` | The token's `aud`. The proxy checks it, and a backend that verifies tokens should too |
 | `claims.subject`, `claims.email`, `claims.groups` | `sub`, `email`, `groups` | Which claim (JWT login) or attribute (SAML) of the person's login supplies each value. `sub` is the SAML NameID. Values are copied as they are |
 
 The token carries `sub`, `email` (when the login has one) and `groups`. For a SAML
@@ -110,7 +111,6 @@ A request that is not a browser navigation (anything but a `GET` or `HEAD` that 
 rather than a redirect to the IdP, which is what an MCP client needs to find the login. A
 valid SAML session cookie is accepted, and a browser is sent to the IdP.
 
-For a complete setup, see the [OpenSearch MCP with SAML example](opensearch-mcp-saml.md).
 
 ## Control who gets a token
 
@@ -118,58 +118,35 @@ The ACL decides this twice. It is checked at login for the token the person woul
 (as a `POST` to the `mcp_url` path), so someone who could never use it is refused then,
 and again on every request the token makes. The rule in the configuration above shows the
 shape: name the proxy's own tokens as `mode: jwt, source: tap-oauth`, and match the token's
-claims. Leave out `claims` to let anyone who signs in through and have the backend decide.
+claims. Leave out `claims` to let anyone who signs in through, and have the backend decide if it
+can: with a backend that has no auth, that means anyone who signs in gets full access.
 
 With no ACL rules, every authenticated person can reach every path. Keep the rule's
 `paths` to the protected endpoint.
 
-## Point the backend at the proxy
+## The backend
 
-The proxy serves the keys and discovery document the backend needs, and forwards the token
-unchanged, so any backend that verifies JWTs can trust it. For OpenSearch, add an `openid`
-authentication domain to `config.yml`, ordered before any domain with `challenge: true`.
-OpenSearch must be able to reach the proxy at `openid_connect_url`.
+**With no auth of its own**, there is nothing to configure. The proxy verifies every token and
+applies the ACL, and the backend ignores the `Authorization` header it receives. Two things
+follow:
 
-```yaml
-mcp_openid_auth_domain:
-  http_enabled: true
-  transport_enabled: true
-  order: 0
-  http_authenticator:
-    type: openid
-    challenge: false
-    config:
-      subject_key: sub
-      roles_key: groups
-      required_audience: https://os.example.com/_plugins/_ml/mcp
-      openid_connect_url: https://os.example.com/_tap/oauth/.well-known/openid-configuration
-  authentication_backend:
-    type: noop
-```
+- Make the backend reachable only through the proxy. Anything else that can reach it is
+  unauthenticated.
+- The ACL is the only access control, and the backend cannot tell people apart. Every tool
+  call runs with whatever access the backend itself has.
 
-Map the group to a role. Besides the index permissions you want to give, the role needs
-the MCP permission:
+**If it verifies JWTs**, it can trust the same token, which the proxy forwards unchanged.
+Configure it to:
 
-```yaml
-mcp_reader:
-  cluster_permissions:
-    - cluster_composite_ops_ro
-    - cluster:admin/opensearch/ml/mcp/server
-  index_permissions:
-    - index_patterns:
-        - "logs-*"
-      allowed_actions:
-        - read
-```
+- Fetch the signing keys from `<sp_base_url>/_tap/oauth/jwks.json`, or discover them from
+  `<sp_base_url>/_tap/oauth/.well-known/openid-configuration`. The backend must be able to
+  reach that URL.
+- Accept the issuer `<sp_base_url>/_tap/oauth` and the audience `outbound.token.audience`,
+  which defaults to `mcp_url`.
+- Take the user from `sub` and their groups from `groups`.
 
-```yaml
-mcp_reader:
-  backend_roles:
-    - os-mcp-readers
-```
-
-OpenSearch runs each tool call as the person: asking for an index their role cannot read
-fails with `no permissions for [indices:data/read/search]`.
+For a complete setup with a real backend, see the
+[OpenSearch MCP with SAML example](opensearch-mcp-saml.md).
 
 ## Connect a client
 
@@ -210,8 +187,8 @@ off. Replacing every sealing key revokes all of them.
 With dynamic registration on, add the server by its URL and log in:
 
 ```sh
-claude mcp add --transport http os https://os.example.com/_plugins/_ml/mcp
-claude mcp login os
+claude mcp add --transport http my-server https://mcp.example.com/mcp
+claude mcp login my-server
 ```
 
 Without it, list the client. Claude Code redirects to `http://localhost:<port>/callback`,
@@ -227,20 +204,20 @@ clients:
 Then add the server with the client ID, and log in:
 
 ```sh
-claude mcp add-json os '{
+claude mcp add-json my-server '{
   "type": "http",
-  "url": "https://os.example.com/_plugins/_ml/mcp",
+  "url": "https://mcp.example.com/mcp",
   "oauth": {
     "clientId": "claude-code",
     "callbackPort": 8765
   }
 }'
-claude mcp login os
+claude mcp login my-server
 ```
 
 The URL must be the `mcp_url`. Claude Code finds the authorization server itself from the
 `401`, so no metadata URL is needed. `/mcp` inside a session starts the same login. Over SSH
-or in a container, `claude mcp login os --no-browser` prints the URL to open; after signing
+or in a container, `claude mcp login my-server --no-browser` prints the URL to open; after signing
 in, paste the address the browser was sent to (`http://localhost:<port>/callback?code=...`)
 back into the prompt. It needs a terminal.
 

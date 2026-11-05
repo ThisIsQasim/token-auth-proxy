@@ -43,8 +43,8 @@ const (
 )
 
 // TokenConfig is outbound.token: the credential the backend receives when
-// inbound.oauth_server is enabled. The proxy signs these JWTs itself; the
-// backend verifies them against the proxy's published JWKS.
+// inbound.oauth_server is enabled. The proxy signs and checks these JWTs itself;
+// a backend with its own auth can verify them against the published JWKS.
 type TokenConfig struct {
 	// SigningKeys are ES256 (P-256) private keys in PEM. The first signs;
 	// every key is published in the JWKS and verifies, so a rotated-out key
@@ -54,8 +54,8 @@ type TokenConfig struct {
 	// AccessTokenTTL is the lifetime of an access token. Defaults to 15m.
 	AccessTokenTTL time.Duration `yaml:"access_token_ttl,omitempty"`
 
-	// Audience is the aud claim of issued tokens, which the proxy and the
-	// backend check. Defaults to inbound.oauth_server.mcp_url.
+	// Audience is the aud claim of issued tokens, which the proxy checks.
+	// Defaults to inbound.oauth_server.mcp_url.
 	Audience string `yaml:"audience,omitempty"`
 
 	// Claims names the claim (JWT login) or attribute (SAML) of the user's

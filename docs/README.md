@@ -39,8 +39,8 @@ SAML's login flow sends the password only to the IdP.
 It also has:
 
 - An OAuth server: tools such as MCP clients log in through any of the
-  methods above and get short-lived tokens the backend trusts, with refresh
-  and no state kept by the proxy. See the
+  methods above and get short-lived tokens, with refresh and no
+  state kept by the proxy. The backend needs no auth of its own. See the
   [OAuth server guide](guides/oauth-server.md).
 - ACLs restricting which authenticated identities may use which
   methods and paths. See the [ACL guide](guides/acls.md).
