@@ -1,9 +1,15 @@
 # OAuth server for MCP clients
 
-Let tools such as Claude Code log in through the proxy and get a short-lived
-token your backend trusts. People sign in with whatever the proxy already
-offers (SAML, OIDC, or Basic), nobody is handed a long-lived secret, and the
-backend sees who each request is for.
+Let MCP clients such as Claude Code log in through the proxy and get a short-lived
+token your backend trusts. Nobody is handed a long-lived secret, the backend sees who
+each request is for, and with dynamic client registration a person only needs the URL.
+
+Any login the proxy can run in a browser works, and clients see no difference:
+
+- SAML
+- OIDC with a confidential client (client secret)
+- OIDC with a public client (PKCE, no secret)
+- Basic
 
 The proxy keeps no state for this. Login requests, authorization codes and
 refresh tokens are encrypted values that carry what they need, and the tokens
@@ -13,8 +19,9 @@ are JWTs that the proxy and the backend both verify with the proxy's public keys
 
 1. A client calls the protected URL with no token. The proxy answers `401` with
    `WWW-Authenticate: Bearer resource_metadata="<sp_base_url>/_tap/oauth/protected-resource"`.
-2. The client reads that document, finds the authorization server, and sends the
-   browser to `/_tap/oauth/authorize` (authorization code with PKCE).
+2. The client reads that document, finds the authorization server, registers itself if
+   it has no client ID, and sends the browser to `/_tap/oauth/authorize` (authorization
+   code with PKCE).
 3. The proxy runs its normal login. When the person is identified it checks the
    [ACL](acls.md) and the denylist, then sends the browser back to the client with a code.
 4. The client exchanges the code at `/_tap/oauth/token` for an access token and a
@@ -36,17 +43,16 @@ openssl rand -base64 32 > seal.key
 target: http://opensearch:9200
 inbound:
   auth:
+    # Any login method: saml as here, an inbound.auth.jwt source with login, or basic.
     saml:
-      # ... any login method: saml, an inbound.auth.jwt source with login, or basic
+      # ...
   oauth_server:
     sp_base_url: https://os.example.com
     mcp_url: https://os.example.com/_plugins/_ml/mcp
     sealing_keys:
       - ${file:/keys/seal.key}
-    clients:
-      - id: claude-code
-        redirect_uris:
-          - http://localhost/callback
+    dynamic_registration:
+      enabled: true
 outbound:
   token:
     signing_keys:
@@ -81,7 +87,7 @@ the backend connection, and the server name is still checked.
 | `sealing_keys` | required | Base64 32-byte keys. The first seals; every key opens, which is how you rotate |
 | `clients` | required unless `dynamic_registration` is on | Public clients (PKCE required, no secret). `redirect_uris` are exact `https` URLs, or `http` loopback URLs (`localhost`, `127.0.0.1`, `[::1]`) that match on any port |
 | `dynamic_registration` | off | `enabled`, and `redirect_uris`: the `https` callbacks a client may register. Empty by default, which allows loopback only |
-| `denylist.subjects` | none | Subjects (the `sub` of the login, compared ignoring case, no surrounding whitespace) that are refused at login, at code exchange, at refresh and on every request |
+| `denylist.subjects` | none | Subjects (the token's `sub`, compared ignoring case, no surrounding whitespace) that are refused at login, at code exchange, at refresh and on every request |
 | `disabled` | `false` | Takes the server out of rotation without deleting its configuration |
 
 **`outbound.token`**
@@ -91,40 +97,41 @@ the backend connection, and the server name is still checked.
 | `signing_keys` | required | ES256 (P-256) private keys in PEM, each with a `kid`. The first signs; all are published and verify |
 | `access_token_ttl` | `15m` | Access token lifetime (1m to 1h) |
 | `audience` | `mcp_url` | The token's `aud`. The proxy and the backend both check it |
-| `claims.subject`, `claims.email`, `claims.groups` | `sub`, `email`, `groups` | Which claim (JWT login) or attribute (SAML) of the person's login supplies each value. Values are copied as they are |
+| `claims.subject`, `claims.email`, `claims.groups` | `sub`, `email`, `groups` | Which claim (JWT login) or attribute (SAML) of the person's login supplies each value. `sub` is the SAML NameID. Values are copied as they are |
 
 The token carries `sub`, `email` (when the login has one) and `groups`. For a SAML
-login whose roles arrive in an attribute called `Roles`, set `claims.groups: Roles`.
+login whose roles arrive in an attribute called `Roles`, set `claims.groups: Roles`. A
+Basic login uses the username as `sub` and has no email or groups.
+
+## With SAML as the login
+
+A request that is not a browser navigation (anything but a `GET` or `HEAD` that accepts
+`text/html`) and has no SAML session gets the `401` with the `resource_metadata` challenge
+rather than a redirect to the IdP, which is what an MCP client needs to find the login. A
+valid SAML session cookie is accepted, and a browser is sent to the IdP.
+
+For a complete setup, see the [OpenSearch MCP with SAML example](opensearch-mcp-saml.md).
 
 ## Control who gets a token
 
 The ACL decides this twice. It is checked at login for the token the person would get
 (as a `POST` to the `mcp_url` path), so someone who could never use it is refused then,
-and again on every request the token makes. Name the proxy's own tokens as `mode: jwt, source: tap-oauth`, and match
-the claims above:
-
-```yaml
-acl:
-  - principals:
-      - mode: jwt
-        source: tap-oauth
-        claims:
-          groups: os-mcp-readers
-    paths:
-      - /_plugins/_ml/mcp
-```
+and again on every request the token makes. The rule in the configuration above shows the
+shape: name the proxy's own tokens as `mode: jwt, source: tap-oauth`, and match the token's
+claims. Leave out `claims` to let anyone who signs in through and have the backend decide.
 
 With no ACL rules, every authenticated person can reach every path. Keep the rule's
 `paths` to the protected endpoint.
 
 ## Point the backend at the proxy
 
-The proxy serves the keys and discovery document the backend needs. For OpenSearch, add
-an `openid` authentication domain to `config.yml`. OpenSearch must be able to reach the
-proxy at that URL.
+The proxy serves the keys and discovery document the backend needs, and forwards the token
+unchanged, so any backend that verifies JWTs can trust it. For OpenSearch, add an `openid`
+authentication domain to `config.yml`, ordered before any domain with `challenge: true`.
+OpenSearch must be able to reach the proxy at `openid_connect_url`.
 
 ```yaml
-openid_auth_domain:
+mcp_openid_auth_domain:
   http_enabled: true
   transport_enabled: true
   order: 0
@@ -166,12 +173,11 @@ fails with `no permissions for [indices:data/read/search]`.
 
 ## Connect a client
 
-Either register each client in `clients` with the redirect URI it uses, or turn on
-[dynamic registration](#let-clients-register-themselves) and let them register
-themselves. A client needs to support
-the OAuth authorization code flow with PKCE (S256), find the authorization server from
-the `resource_metadata` in the `401`, and use a public client ID. The proxy also serves
-the two documents at the well-known locations a client looks in when it does not follow
+Either let clients [register themselves](#let-clients-register-themselves), as the
+configuration above does, or list each one in `clients` with the redirect URI it uses. A
+client needs to support the OAuth authorization code flow with PKCE (S256), find the
+authorization server from the `resource_metadata` in the `401`, and use a public client
+ID. The proxy also serves the two documents at the well-known locations a client looks in when it does not follow
 that hint: `/.well-known/oauth-protected-resource` (also with the MCP path appended) and,
 for the issuer, `/.well-known/oauth-authorization-server/_tap/oauth` and
 `/.well-known/openid-configuration/_tap/oauth`.
@@ -208,9 +214,17 @@ claude mcp add --transport http os https://os.example.com/_plugins/_ml/mcp
 claude mcp login os
 ```
 
-Without it, register the client the way the configuration above does (`id: claude-code`, redirect URI
-`http://localhost/callback`; Claude Code redirects to `http://localhost:<port>/callback`, and
-a loopback URI matches on any port). Then add the server with the client ID, and log in:
+Without it, list the client. Claude Code redirects to `http://localhost:<port>/callback`,
+and a loopback URI matches on any port:
+
+```yaml
+clients:
+  - id: claude-code
+    redirect_uris:
+      - http://localhost/callback
+```
+
+Then add the server with the client ID, and log in:
 
 ```sh
 claude mcp add-json os '{
@@ -227,7 +241,7 @@ claude mcp login os
 The URL must be the `mcp_url`. Claude Code finds the authorization server itself from the
 `401`, so no metadata URL is needed. `/mcp` inside a session starts the same login. Over SSH
 or in a container, `claude mcp login os --no-browser` prints the URL to open; after signing
-in, paste the address the browser was sent to (`http://localhost:8765/callback?code=...`)
+in, paste the address the browser was sent to (`http://localhost:<port>/callback?code=...`)
 back into the prompt. It needs a terminal.
 
 Claude Code keeps the refresh token and renews the access token on its own; you sign in
@@ -235,10 +249,16 @@ again only after `refresh_absolute_lifetime`, or if you are removed with the den
 
 ### claude.ai, Claude Desktop and Claude mobile
 
+These apps share one connector and one callback URL, so one setup covers all of them. Add
+the connector in **Customize > Connectors** (on a Team or Enterprise plan, an Owner adds it
+in **Organization settings > Connectors**, and members then connect with their own account)
+and enter the `mcp_url` as the server URL. The connector then shows up in the Claude mobile
+apps for the same account, where you turn it on from the **+** menu of a chat.
+
 With dynamic registration on and `https://claude.ai/api/mcp/auth_callback` in its
-`redirect_uris`, leave the OAuth client setting on **Register automatically** and enter only
-the `mcp_url`. Otherwise these apps share one connector and one callback URL,
-so one client covers all of them:
+`redirect_uris`, leave the OAuth client setting on **Register automatically**.
+
+Without it, list the client:
 
 ```yaml
 clients:
@@ -247,24 +267,16 @@ clients:
       - https://claude.ai/api/mcp/auth_callback
 ```
 
-Add the connector in **Customize > Connectors** (on a Team or Enterprise plan, an Owner adds it in
-**Organization settings > Connectors**, and members then connect with their own account). The connector then shows up in the Claude mobile apps for the same account, where you turn it on from the **+** menu of a chat. Enter the
-`mcp_url` as the server URL and, under the OAuth client setting, choose **Use your own OAuth client**:
-client ID `claude-ai`, secret left blank, since it is a public client that relies on PKCE. Without
-dynamic registration, **Register automatically** will not work, and neither will **Use Claude's
-published identity**, since the server does not support Client ID Metadata Documents. Claude cannot
-change a connector's authentication settings afterwards; remove it and add it again.
+Under the OAuth client setting, choose **Use your own OAuth client**: client ID `claude-ai`,
+secret left blank, since it is a public client that relies on PKCE. **Register automatically**
+will not work in this setup, and neither will **Use Claude's published identity**, since the
+server does not support Client ID Metadata Documents.
+
+Claude cannot change a connector's authentication settings afterwards; remove it and add it
+again.
 
 The server has to be reachable from Anthropic's network (`160.79.104.0/21`), including its discovery
 documents, so do not put an IP allowlist or a bot filter in front of it that blocks that range.
-
-## With SAML as the login
-
-With the OAuth server on, a request that is not a browser navigation (anything but a `GET`
-or `HEAD` that accepts `text/html`) is no longer redirected to the IdP when it has no SAML
-session. It gets the `401` with the `resource_metadata` challenge instead, which is what an
-MCP client needs to find the login. A valid SAML session cookie is still accepted, and a
-browser is still sent to the IdP.
 
 ## Operate it
 

@@ -64,6 +64,7 @@ that, this isn't the tool for it.
 - **Setting up SAML SSO?** → [SAML SSO guide](guides/saml-sso.md)
 - **Signing browsers in with OIDC (Authentik, Keycloak, Google, ...)?** → [OIDC login guide](guides/oidc-login.md)
 - **Letting an MCP client (Claude Code, ...) log in and call the backend?** → [OAuth server guide](guides/oauth-server.md)
+- **Adding MCP to an OpenSearch that already uses SAML?** → [OpenSearch MCP with SAML example](guides/opensearch-mcp-saml.md)
 - **Restricting who can use which paths?** → [ACL guide](guides/acls.md)
 - **Wiring up metrics/traces/logs?** → [Observability guide](guides/observability.md)
 - **Deploying with live config changes (e.g. in Kubernetes)?** → [Hot-reload & configuration guide](guides/hot-reload.md)
