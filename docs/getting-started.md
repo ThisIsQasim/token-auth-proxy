@@ -7,7 +7,7 @@ verification.
 
 Pick whichever fits your workflow:
 
-**Go install** (requires Go 1.26+):
+**Go install** (requires Go 1.27+):
 
 ```sh
 go install github.com/ThisIsQasim/token-auth-proxy/cmd/token-auth-proxy@latest

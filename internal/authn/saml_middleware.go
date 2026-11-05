@@ -93,9 +93,8 @@ func (b *bufferedResponse) writeTo(w http.ResponseWriter) {
 // RequireAccount always redirects rather than ever calling mw.OnError
 // for a bad session specifically — only a genuine internal error (e.g.
 // failing to write the tracker cookie) reaches OnError from this path.
-// A valid session forwards to next byte-for-byte unchanged, same as
-// NewMiddleware's JWT leg: no identity headers injected, no request
-// mutation.
+// A valid session forwards to next with no identity headers injected, same
+// as NewMiddleware's JWT leg.
 func enforceSAML(mw *samlsp.Middleware, next http.Handler) http.Handler {
 	return mw.RequireAccount(next)
 }

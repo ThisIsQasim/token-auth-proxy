@@ -73,13 +73,16 @@ func (i *InboundConfig) Validate() error {
 	return i.Auth.Validate()
 }
 
-// OutboundConfig mirrors InboundConfig for the backend leg: the credential
-// the backend receives. Token describes the JWTs the proxy issues itself
+// OutboundConfig mirrors InboundConfig for the backend leg: what the backend
+// receives. Token describes the JWTs the proxy issues itself
 // when inbound.oauth_server is enabled. Other forms of credential rewriting
 // (e.g. verify an inbound SAML assertion and mint a JWT to attach when
 // forwarding) are reserved for later.
 type OutboundConfig struct {
 	Token *TokenConfig `yaml:"token,omitempty"`
+
+	// PromLabelProxy enforces Prometheus label matchers on forwarded requests.
+	PromLabelProxy *PromLabelProxyConfig `yaml:"prom_label_proxy,omitempty"`
 }
 
 // InboundAuthConfig has no separate enabled/disabled switch of its own:

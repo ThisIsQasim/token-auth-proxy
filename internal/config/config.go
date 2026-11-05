@@ -138,6 +138,12 @@ func (c *Config) Validate() error {
 		return err
 	}
 
+	if p := c.Outbound.PromLabelProxy; p != nil {
+		if err := p.validate(c.Inbound.Auth); err != nil {
+			return fmt.Errorf("outbound.prom_label_proxy: %w", err)
+		}
+	}
+
 	c.targetCAPool = nil
 	if c.TargetCACert != "" {
 		if u.Scheme != "https" {

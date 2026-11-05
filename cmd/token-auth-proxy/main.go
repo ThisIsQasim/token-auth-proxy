@@ -24,6 +24,7 @@ import (
 	"github.com/ThisIsQasim/token-auth-proxy/internal/authn"
 	"github.com/ThisIsQasim/token-auth-proxy/internal/config"
 	"github.com/ThisIsQasim/token-auth-proxy/internal/oauth"
+	"github.com/ThisIsQasim/token-auth-proxy/internal/promlabel"
 	"github.com/ThisIsQasim/token-auth-proxy/internal/proxy"
 	"github.com/ThisIsQasim/token-auth-proxy/internal/telemetry"
 )
@@ -153,6 +154,8 @@ func run() error {
 
 	transport := proxy.BuildTransport(cfg)
 	rp := proxy.New(source, logger, transport)
+	rp.ModifyResponse = promlabel.ModifyResponse
+	forward := promlabel.New(source, rp, transport, logger)
 	requireAuth := authn.NewMiddleware(source, authRegistry, samlRegistry, basicRegistry, authn.NewLoginRegistry(authRegistry, logger), oauthRegistry, logger)
 
 	mux := http.NewServeMux()
@@ -164,7 +167,7 @@ func run() error {
 	// otelhttp wraps only this route (not /healthz or /metrics), so
 	// health/metrics polling doesn't spam traces or double-count in its
 	// own metrics.
-	mux.Handle("/", otelhttp.NewMiddleware("token-auth-proxy")(requireAuth(rp)))
+	mux.Handle("/", otelhttp.NewMiddleware("token-auth-proxy")(requireAuth(forward)))
 
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", cfg.ListenAddr)

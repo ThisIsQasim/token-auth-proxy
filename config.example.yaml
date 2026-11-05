@@ -295,3 +295,25 @@ timeouts:
 #       - GET
 #     paths:
 #       - /prometheus/*        # prefix match
+
+# ---- Prometheus label enforcement --------------------------------------
+# Restricts callers to their own series, with label values taken from their
+# claims. Applies after the ACL. See README "Prometheus label enforcement".
+#
+# outbound:
+#   prom_label_proxy:
+#     path_prefixes:             # where the APIs live on the target; default /
+#       - /
+#     exempt:                    # forwarded unchanged, on any path
+#       - mode: basic
+#         username: writer
+#     rules:                     # first whose principals match wins
+#       - principals:
+#           - mode: jwt
+#             source: idp
+#         labels:                # all enforced together
+#           - name: namespace
+#             claim: groups      # a list claim gives several values
+#             pattern: "tenant-(.+)"   # must match in full; group 1 is the value
+#     passthrough_paths:         # unenforced for rule-matched callers
+#       - /api/v1/status/buildinfo

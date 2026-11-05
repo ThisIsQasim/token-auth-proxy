@@ -1,10 +1,8 @@
 package authn
 
 import (
-	"fmt"
 	"log/slog"
 	"net/http"
-	"strconv"
 	"strings"
 
 	"github.com/crewjam/saml/samlsp"
@@ -67,7 +65,7 @@ func authorize(w http.ResponseWriter, r *http.Request, rules []config.ACLRule, p
 	}
 	// Rules match the clean, decoded path, so anything the backend might
 	// resolve differently ("..", "//", an encoded "/") is refused outright.
-	if !config.IsCleanPath(r.URL.Path) || strings.Contains(strings.ToLower(r.URL.RawPath), "%2f") {
+	if uncleanPath(r) {
 		rejectForbidden(w, logger, r, p, "unclean_path", true)
 		return false
 	}
@@ -76,6 +74,12 @@ func authorize(w http.ResponseWriter, r *http.Request, rules []config.ACLRule, p
 	}
 	rejectForbidden(w, logger, r, p)
 	return false
+}
+
+// uncleanPath reports whether r's path is one a backend might resolve differently
+// from the decoded form matched here: "..", "//", or an encoded "/".
+func uncleanPath(r *http.Request) bool {
+	return !config.IsCleanPath(r.URL.Path) || strings.Contains(strings.ToLower(r.URL.RawPath), "%2f")
 }
 
 // samlSessionPrincipal is the identity of the SAML session in r's context,
@@ -182,28 +186,24 @@ func claimContains(claim any, want string) bool {
 }
 
 func scalarEquals(v any, want string) bool {
-	switch s := v.(type) {
-	case nil, []any, map[string]any:
-		return false
-	case string:
-		return s == want
-	case float64:
-		// JSON numbers decode as float64; %v would print 1000000 as "1e+06".
-		return strconv.FormatFloat(s, 'f', -1, 64) == want
-	default:
-		return fmt.Sprint(s) == want
-	}
+	s, ok := scalarString(v)
+	return ok && s == want
 }
 
 // rejectForbidden writes a minimal 403 for an authenticated request no
 // ACL rule allows. Only the reason is a metric label; the subject is
 // logged, never exported, so /metrics can't enumerate identities.
 func rejectForbidden(w http.ResponseWriter, logger *slog.Logger, r *http.Request, p *principal, extra ...any) {
+	rejectForbiddenFor(w, logger, r, p, reasonACLDenied, extra...)
+}
+
+// rejectForbiddenFor is rejectForbidden with its reason named.
+func rejectForbiddenFor(w http.ResponseWriter, logger *slog.Logger, r *http.Request, p *principal, why reason, extra ...any) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusForbidden)
 	_, _ = w.Write([]byte("forbidden"))
 
-	fields := []any{"reason", string(reasonACLDenied), "method", r.Method, "path", r.URL.Path}
+	fields := []any{"reason", string(why), "method", r.Method, "path", r.URL.Path}
 	if p != nil {
 		fields = append(fields, "mode", p.mode, "subject", truncate(p.identity(), maxLoggedUsernameLen))
 		if p.source != "" {
@@ -211,5 +211,5 @@ func rejectForbidden(w http.ResponseWriter, logger *slog.Logger, r *http.Request
 		}
 	}
 	logger.InfoContext(r.Context(), "rejected request", append(fields, extra...)...)
-	recordRejection(r.Context(), reasonACLDenied)
+	recordRejection(r.Context(), why)
 }

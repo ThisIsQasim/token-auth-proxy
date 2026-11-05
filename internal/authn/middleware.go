@@ -263,7 +263,10 @@ func NewMiddleware(source ConfigSource, jwtReg *Registry, samlReg *SAMLRegistry,
 			}
 
 			authenticate(w, r, cfg, regs, logger, func(p *principal, r *http.Request) {
-				if authorize(w, r, cfg.ACL, p, logger) {
+				if !authorize(w, r, cfg.ACL, p, logger) {
+					return
+				}
+				if r, ok := resolvePromLabels(w, r, cfg, p, logger); ok {
 					next.ServeHTTP(w, r)
 				}
 			})
@@ -314,10 +317,9 @@ func authenticate(w http.ResponseWriter, r *http.Request, cfg *config.Config, re
 		outcome, username := enforceBasic(w, r, basicSrc, basicReg, logger)
 		switch outcome {
 		case basicAllowed:
-			// Forwarded byte-for-byte unchanged, like the other
-			// legs — the Authorization header included, since
-			// stripping it would break a backend that does its
-			// own thing with the same credential.
+			// The Authorization header stays, like the other legs:
+			// stripping it would break a backend that does its own
+			// thing with the same credential.
 			allow(basicPrincipal(username), r)
 			return
 		case basicRejected:
@@ -345,10 +347,8 @@ func authenticate(w http.ResponseWriter, r *http.Request, cfg *config.Config, re
 		}
 		switch outcome {
 		case jwtAllowed:
-			// Forwarded byte-for-byte unchanged: no identity
-			// headers injected, no request mutation — not
-			// promised anywhere in the schema, and real scope
-			// creep to add here.
+			// No identity headers injected. Any request mutation is
+			// outbound.prom_label_proxy's, downstream of this leg.
 			allow(p, r)
 			return
 		case jwtRejected:

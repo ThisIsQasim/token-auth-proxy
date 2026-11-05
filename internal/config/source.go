@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 
+	"github.com/go-viper/mapstructure/v2"
 	env "github.com/knadh/koanf/providers/env/v2"
 	"github.com/knadh/koanf/providers/posflag"
 	"github.com/knadh/koanf/v2"
@@ -98,6 +100,8 @@ var jsonFieldSpecs = []jsonFieldSpec{
 		usage: "JSON object fully replacing inbound.oauth_server (env TAP_INBOUND_OAUTH_SERVER_JSON)"},
 	{koanfKey: "outbound.token", flagName: "outbound-token-json", envName: "OUTBOUND_TOKEN_JSON",
 		usage: "JSON object fully replacing outbound.token (env TAP_OUTBOUND_TOKEN_JSON)"},
+	{koanfKey: "outbound.prom_label_proxy", flagName: "outbound-prom-label-proxy-json", envName: "OUTBOUND_PROM_LABEL_PROXY_JSON",
+		usage: "JSON object fully replacing outbound.prom_label_proxy (env TAP_OUTBOUND_PROM_LABEL_PROXY_JSON)"},
 	{koanfKey: "acl", flagName: "acl-json", envName: "ACL_JSON",
 		usage: "JSON array fully replacing acl (env TAP_ACL_JSON)"},
 }
@@ -161,11 +165,48 @@ func decode(k *koanf.Koanf) (*Config, error) {
 	if err := k.UnmarshalWithConf("", &cfg, koanf.UnmarshalConf{Tag: "yaml"}); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
+	if err := checkOutboundKeys(k, &cfg); err != nil {
+		return nil, fmt.Errorf("invalid config: %w", err)
+	}
 	cfg.applyDefaults()
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 	return &cfg, nil
+}
+
+// rootKeys are the top-level config keys. "config" is the --config flag's own.
+var rootKeys = []string{"config", "listen_addr", "target", "target_ca_cert", "timeouts", "inbound", "outbound", "acl"}
+
+// checkOutboundKeys refuses unknown top-level keys and unknown keys under
+// outbound, which the main decode ignores: a mistyped outbound or
+// prom_label_proxy key, or a block left empty, would otherwise forward requests
+// with no label enforcement at all.
+func checkOutboundKeys(k *koanf.Koanf, cfg *Config) error {
+	for key := range k.Raw() {
+		if !slices.Contains(rootKeys, key) {
+			return fmt.Errorf("unknown config key %q", key)
+		}
+	}
+	if !k.Exists("outbound") {
+		return nil
+	}
+	var strict OutboundConfig
+	err := k.UnmarshalWithConf("outbound", &strict, koanf.UnmarshalConf{
+		Tag: "yaml",
+		DecoderConfig: &mapstructure.DecoderConfig{
+			DecodeHook:       mapstructure.StringToTimeDurationHookFunc(),
+			WeaklyTypedInput: true,
+			ErrorUnused:      true,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("outbound: %w", err)
+	}
+	if k.Exists("outbound.prom_label_proxy") && cfg.Outbound.PromLabelProxy == nil {
+		return fmt.Errorf("outbound.prom_label_proxy: is empty, remove it or add rules")
+	}
+	return nil
 }
 
 // loadOverrides loads environment variables and then CLI flags into k,

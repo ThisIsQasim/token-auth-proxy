@@ -5,8 +5,8 @@ run:
   # golangci-lint v2.12.2 (current latest as of writing) is itself built
   # with go1.25 and refuses to analyze a go.mod targeting a newer Go
   # version than that. Pinning the analysis target here decouples that
-  # from go.mod's own `go 1.26.5` directive — we don't use any
-  # 1.26-exclusive syntax, so this is safe until golangci-lint catches up.
+  # from go.mod's own `go 1.27.3` directive — we don't use any
+  # 1.27-exclusive syntax, so this is safe until golangci-lint catches up.
   go: "1.25"
 
 linters:

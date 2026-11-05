@@ -10,8 +10,9 @@ rather than repeating it.
 
 token-auth-proxy sits in front of a single backend and checks that a
 request is authenticated before forwarding it. It forwards everything
-it lets through unchanged to one configured `target` — no path-based
-routing, no request rewriting, no load balancing.
+it lets through to one configured `target`, with no path-based routing
+and no load balancing. Requests are forwarded unchanged unless Prometheus
+label enforcement is configured.
 
 It supports these ways of authenticating a request:
 
@@ -46,12 +47,14 @@ It also has:
 - OpenTelemetry traces, metrics, and structured logs, plus an
   always-on `/metrics` endpoint. See the
   [observability guide](guides/observability.md).
+- Prometheus label enforcement from token claims. See the
+  [README](../README.md#prometheus-label-enforcement).
 - Config hot-reload with no restart. See the
   [hot-reload guide](guides/hot-reload.md).
 
-It does one backend: no per-path routing, no
-request/response transformation, no multiple backends. If you need
-that, this isn't the tool for it.
+It does one backend: no per-path routing, no general request or response
+transformation, no multiple backends. If you need that, this isn't the
+tool for it.
 
 ## Where to go next
 

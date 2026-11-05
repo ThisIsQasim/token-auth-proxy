@@ -2,7 +2,7 @@
 
 ## Setup
 
-- Go 1.26.5 or newer (the toolchain will auto-download it if you have an
+- Go 1.27.3 or newer (the toolchain will auto-download it if you have an
   older one and `GOTOOLCHAIN=auto`, the default).
 - Install [pre-commit](https://pre-commit.com/) once per machine:
   ```sh
@@ -16,6 +16,17 @@
   go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
   go install golang.org/x/tools/cmd/goimports@latest
   ```
+
+## Dependencies
+
+Every dependency stays on its latest stable release: Go (`go.mod`, `Dockerfile`
+and the workflows), Go modules, GitHub Actions and base images. Bump them as
+part of working here, and before a release. `go get -u -t -tags "integration load" ./...`
+covers modules imported only under build tags.
+
+One exception: `github.com/prometheus/prometheus` stays on the newest version
+the latest `prom-label-proxy` compiles against, currently v0.315.1. Move it up
+when a new `prom-label-proxy` release allows.
 
 ## Before pushing
 

@@ -28,7 +28,6 @@ import (
 	"go.opentelemetry.io/contrib/exporters/autoexport"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/prometheus"
-	logglobal "go.opentelemetry.io/otel/log/global"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/log"
 	"go.opentelemetry.io/otel/sdk/metric"
@@ -139,7 +138,7 @@ func Setup(ctx context.Context, baseLogger *slog.Logger) (*Providers, error) {
 			log.WithProcessor(log.NewBatchProcessor(exp)),
 			log.WithResource(res),
 		)
-		logglobal.SetLoggerProvider(lp)
+		otel.SetLoggerProvider(lp)
 		shutdowns = append(shutdowns, lp.Shutdown)
 
 		otelHandler := otelslog.NewHandler(serviceName, otelslog.WithLoggerProvider(lp))

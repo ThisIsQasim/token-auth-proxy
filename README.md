@@ -147,9 +147,9 @@ routing exists to pick among multiple IdPs by) and `inbound.auth.basic`
 one realm, and two user lists guarding one backend is one user list)
 describe trusted credential sources. `inbound.oauth_server` and
 `outbound.token`, which go together, turn the proxy into an OAuth server
-that issues tokens the backend trusts (see [OAuth server](#oauth-server)); the rest of `outbound` is reserved for a later pass
-(rewriting credentials on the backend leg, e.g. verifying an inbound SAML
-assertion and minting an outbound OIDC-style JWT). See
+that issues tokens the backend trusts (see [OAuth server](#oauth-server)). `outbound.prom_label_proxy` enforces
+Prometheus label matchers on forwarded requests (see
+[Prometheus label enforcement](#prometheus-label-enforcement)). See
 [`config.example.yaml`](./config.example.yaml) for a full commented-out
 example of each.
 
@@ -800,6 +800,85 @@ acl:
   method and path, and count toward
   `authn_rejections_total{reason="acl_denied"}`. The subject is never a
   metric label.
+
+## Prometheus label enforcement
+
+`outbound.prom_label_proxy` restricts callers to their own Prometheus series,
+in the manner of [prom-label-proxy](https://github.com/prometheus-community/prom-label-proxy),
+with the label values taken from their token claims. It runs after the ACL
+and is off unless the block is present.
+
+```yaml
+outbound:
+  prom_label_proxy:
+    path_prefixes:
+      - /
+    exempt:
+      - mode: basic
+        username: writer
+    rules:
+      - principals:
+          - mode: jwt
+            source: idp
+        labels:
+          - name: namespace
+            claim: groups
+            pattern: "tenant-(.+)"
+      - principals:
+          - mode: jwt
+            source: k8s
+        labels:
+          - name: namespace
+            claim: sub
+            pattern: "system:serviceaccount:([^:]+):.+"
+          - name: cluster
+            claim: iss
+    passthrough_paths:
+      - /api/v1/status/buildinfo
+```
+
+| Field | Meaning |
+| --- | --- |
+| `path_prefixes` | Where the Prometheus and Alertmanager APIs live on the target. Defaults to `/`. |
+| `exempt` | Principals forwarded unchanged, on any path. Same syntax as an ACL principal. |
+| `rules` | Tried in order; the first whose `principals` match applies. `mode: jwt` or `mode: saml` alone matches every such caller. |
+| `rules[].labels` | The labels enforced, all of them together. `claim` names a top-level JWT claim or SAML attribute. |
+| `rules[].labels[].pattern` | Optional regular expression. A value must match it in full or is dropped, and its capture group, if any, becomes the label value. |
+| `passthrough_paths` | Forwarded unchanged for callers a rule matched. Same syntax as ACL paths. |
+
+Also settable as `--outbound-prom-label-proxy-json` or
+`TAP_OUTBOUND_PROM_LABEL_PROXY_JSON`. Unknown top-level keys and unknown keys under
+`outbound` fail the load, since a mistyped key here would otherwise disable
+enforcement.
+
+**Every request ends one of three ways.** An exempt principal is forwarded
+unchanged. A caller matching a rule, with a value for each of its labels, is
+enforced on the endpoints below or passed through on `passthrough_paths`.
+Everything else gets a 403: no matching rule, a label left without a value, or
+any other path.
+
+One value gives `label="v"`, several give an escaped `label=~"a|b"`. A selector
+of the caller's that can't overlap the enforced matcher is a 400, not a silent
+rewrite.
+
+| Endpoint | Enforcement |
+| --- | --- |
+| `/api/v1/query`, `query_range`, `query_exemplars` | Matchers injected into the PromQL, in the URL and in a urlencoded POST body. |
+| `/api/v1/series`, `labels`, `label/<name>/values`, `/federate` | Matchers enforced on each `match[]`, or added if there are none. |
+| `/api/v1/rules`, `/api/v1/alerts` | Response filtered to entries carrying every enforced label with an allowed value. |
+| `/api/v2/alerts`, `/api/v2/alerts/groups` | Matchers added to the `filter` parameter. |
+| `/api/v2/silences` (GET) | Response filtered to the caller's silences. |
+| `/api/v2/silences` (POST), `/api/v2/silence/<id>` (DELETE) | See below. |
+
+**Silences.** A silence belongs to a caller when every enforced label has an
+equality matcher on a value they hold. Regex and negative matchers on an
+enforced label never count. To create one, a caller with a single value has
+its matcher set for them, and a caller with several names one. At least one
+other matcher is required. Updating or deleting a silence first looks it up on
+the target and answers 403 unless the caller owns it.
+
+Rule and alert responses that can't be parsed answer 502 rather than being
+forwarded unfiltered. Rejections count under the `prom_label_denied` reason.
 
 ## Observability
 

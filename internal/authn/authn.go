@@ -75,8 +75,11 @@ const (
 	// there is no authorization or token endpoint to use.
 	reasonLoginUnavailable reason = "login_unavailable"
 
-	// reasonACLDenied is the only 403 reason: the request authenticated
+	// reasonACLDenied is the ACL's 403 reason: the request authenticated
 	// (or no auth is enabled) but no ACL rule allows it, or its path isn't
 	// clean enough to match rules against safely.
 	reasonACLDenied reason = "acl_denied"
+	// reasonPromLabelDenied is a 403 from outbound.prom_label_proxy: the ACL
+	// allowed the request but no label enforcement could be applied to it.
+	reasonPromLabelDenied reason = "prom_label_denied"
 )
